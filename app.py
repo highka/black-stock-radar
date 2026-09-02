@@ -3,1469 +3,201 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
-# =========================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V2.2
-# =========================================================
+# ============================================================
+# 🖤 黑嚕嚕－台股盤中雷達 V3.0
+# B 路線：先完成雷達核心，V4 再接 Fugle 即時行情
+# ============================================================
 
-st.set_page_config(
-    page_title="🖤 黑嚕嚕－台股盤中雷達",
-    page_icon="🖤",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
+st.markdown('''
+<style>
+.block-container{padding-top:1rem;padding-bottom:2rem}
+[data-testid="stMetric"]{border:1px solid rgba(128,128,128,.25);border-radius:12px;padding:10px}
+.radar-card{border:1px solid rgba(128,128,128,.30);border-radius:14px;padding:14px 16px;margin-bottom:10px;min-height:170px}
+.radar-title{font-size:19px;font-weight:800}.radar-price{font-size:28px;font-weight:900;margin:4px 0}.radar-score{font-size:21px;font-weight:800;margin-top:6px}.small{opacity:.70;font-size:12px}.signal{font-weight:800;font-size:15px}
+</style>''', unsafe_allow_html=True)
 
-# =========================================================
-# CSS
-# =========================================================
+DEFAULT_STOCKS='''1101,1102,1216,1301,1303,1402,1476,1597,2002,2301,2303,2308,2317,2330,2345,2353,2356,2359,2368,2376,2382,2395,2408,2454,2455,2603,2609,2615,3006,3034,3037,3044,3231,3260,3443,3455,3661,3711,4763,4966,5274,5483,6125,6147,6182,6239,6271,6409,6669,8046,8299'''
 
-st.markdown(
-    """
-    <style>
-
-    .main-title {
-        font-size: 32px;
-        font-weight: 800;
-        margin-bottom: 0px;
-    }
-
-    .sub-title {
-        color: #777;
-        font-size: 15px;
-        margin-bottom: 20px;
-    }
-
-    .section-title {
-        font-size: 22px;
-        font-weight: 700;
-        margin-top: 10px;
-        margin-bottom: 10px;
-    }
-
-    .alert-box {
-        padding: 12px 15px;
-        border-radius: 10px;
-        margin-bottom: 8px;
-        background-color: rgba(255, 165, 0, 0.08);
-    }
-
-    .score-card {
-        padding: 12px;
-        border-radius: 12px;
-        background-color: rgba(128,128,128,0.08);
-        text-align: center;
-    }
-
-    .stock-name {
-        font-size: 18px;
-        font-weight: 700;
-    }
-
-    .stock-code {
-        font-size: 14px;
-        color: #777;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# =========================================================
-# 股票清單
-# =========================================================
-
-@st.cache_data
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_stock_list():
-
     try:
-
-        df = pd.read_csv(
-            "stock_list.csv",
-            dtype={"股票代號": str}
-        )
-
-        # 清除空白
-        df["股票代號"] = (
-            df["股票代號"]
-            .astype(str)
-            .str.strip()
-            .str.zfill(4)
-        )
-
-        df["股票名稱"] = (
-            df["股票名稱"]
-            .astype(str)
-            .str.strip()
-        )
-
-        if "市場" not in df.columns:
-            df["市場"] = "未知"
-
-        return df
-
-    except Exception as e:
-
-        st.error(
-            f"無法讀取 stock_list.csv：{e}"
-        )
-
-        return pd.DataFrame(
-            columns=[
-                "股票代號",
-                "股票名稱",
-                "市場"
-            ]
-        )
-
-
-stock_list_df = load_stock_list()
-
-
-# =========================================================
-# 股票名稱
-# =========================================================
-
-def stock_name(symbol):
-
-    symbol = str(symbol).zfill(4)
-
-    result = stock_list_df.loc[
-        stock_list_df["股票代號"] == symbol,
-        "股票名稱"
-    ]
-
-    if not result.empty:
-        return result.iloc[0]
-
-    return symbol
-
-
-# =========================================================
-# 股票市場
-# =========================================================
-
-def stock_market(symbol):
-
-    symbol = str(symbol).zfill(4)
-
-    result = stock_list_df.loc[
-        stock_list_df["股票代號"] == symbol,
-        "市場"
-    ]
-
-    if not result.empty:
-        return result.iloc[0]
-
-    return "未知"
-
-
-# =========================================================
-# RSI
-# =========================================================
-
-def calculate_rsi(series, period=14):
-
-    delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi.fillna(50)
-
-
-# =========================================================
-# 技術指標
-# =========================================================
-
-def calculate_indicators(df):
-
-    if df.empty:
-        return df
-
-    df = df.copy()
-
-    close = df["Close"]
-    volume = df["Volume"]
-
-    # 均線
-    df["MA20"] = close.rolling(20).mean()
-    df["MA60"] = close.rolling(60).mean()
-    df["MA200"] = close.rolling(200).mean()
-
-    # RSI
-    df["RSI"] = calculate_rsi(close)
-
-    # 20日平均成交量
-    df["VOL20"] = volume.rolling(20).mean()
-
-    # 量比
-    df["VolumeRatio"] = (
-        volume /
-        df["VOL20"].replace(0, np.nan)
-    )
-
-    # 前一日20日高點
-    df["High20"] = (
-        close.rolling(20)
-        .max()
-        .shift(1)
-    )
-
-    # 漲跌幅
-    df["Return"] = close.pct_change() * 100
-
-    # 連續量增
-    df["VolumeUp2"] = (
-        (volume > volume.shift(1))
-        &
-        (volume.shift(1) > volume.shift(2))
-    )
-
-    return df
-
-
-# =========================================================
-# 黑嚕嚕分數
-# =========================================================
-
-def calculate_score(row):
-
-    score = 0
-
-    close = row.get("Close", np.nan)
-    ma20 = row.get("MA20", np.nan)
-    ma60 = row.get("MA60", np.nan)
-    ma200 = row.get("MA200", np.nan)
-
-    rsi = row.get("RSI", 50)
-    volume_ratio = row.get("VolumeRatio", 1)
-    return_pct = row.get("Return", 0)
-    high20 = row.get("High20", np.nan)
-
-    # =====================================================
-    # 趨勢
-    # =====================================================
-
-    if pd.notna(ma20) and close > ma20:
-        score += 10
-
-    if pd.notna(ma60) and close > ma60:
-        score += 10
-
-    if (
-        pd.notna(ma20)
-        and
-        pd.notna(ma60)
-        and
-        ma20 > ma60
-    ):
-        score += 10
-
-    if (
-        pd.notna(ma60)
-        and
-        pd.notna(ma200)
-        and
-        ma60 > ma200
-    ):
-        score += 10
-
-    # =====================================================
-    # 量能
-    # =====================================================
-
-    if volume_ratio >= 1.2:
-        score += 5
-
-    if volume_ratio >= 1.5:
-        score += 5
-
-    if volume_ratio >= 2:
-        score += 5
-
-    if volume_ratio >= 3:
-        score += 5
-
-    # =====================================================
-    # 動能
-    # =====================================================
-
-    if return_pct >= 1:
-        score += 5
-
-    if return_pct >= 3:
-        score += 5
-
-    if return_pct >= 5:
-        score += 5
-
-    # =====================================================
-    # RSI
-    # =====================================================
-
-    if 50 <= rsi <= 70:
-        score += 10
-
-    elif 70 < rsi <= 80:
-        score += 5
-
-    # =====================================================
-    # 突破
-    # =====================================================
-
-    if (
-        pd.notna(high20)
-        and
-        close >= high20
-    ):
-        score += 10
-
-    return min(score, 100)
-
-
-# =========================================================
-# 取得股票資料
-# =========================================================
-
-@st.cache_data(
-    ttl=300,
-    show_spinner=False
-)
-def get_stock_data(symbol):
-
-    ticker = f"{symbol}.TW"
-
-    try:
-
-        df = yf.download(
-            ticker,
-            period="1y",
-            interval="1d",
-            auto_adjust=False,
-            progress=False
-        )
-
-        if df.empty:
-            return pd.DataFrame()
-
-        # 處理 yfinance MultiIndex
-        if isinstance(
-            df.columns,
-            pd.MultiIndex
-        ):
-
-            df.columns = (
-                df.columns
-                .get_level_values(0)
-            )
-
-        required = [
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ]
-
-        for col in required:
-
-            if col not in df.columns:
-                return pd.DataFrame()
-
-        df = df[required].copy()
-
-        df.dropna(
-            subset=["Close"],
-            inplace=True
-        )
-
-        df = calculate_indicators(df)
-
-        return df
-
+        d=pd.read_csv('stock_list.csv',dtype=str)
+        d.columns=[str(c).strip() for c in d.columns]
+        code='股票代號' if '股票代號' in d.columns else d.columns[0]
+        d[code]=d[code].astype(str).str.extract(r'(\d+)',expand=False).fillna('').str.zfill(4)
+        for c in ['股票名稱','市場']:
+            if c in d.columns:d[c]=d[c].fillna('').astype(str).str.strip()
+        return d
     except Exception:
-
-        return pd.DataFrame()
-
-
-# =========================================================
-# 掃描股票
-# =========================================================
-
-@st.cache_data(
-    ttl=300,
-    show_spinner=False
-)
-def scan_stocks(stock_list):
-
-    results = []
-
-    for symbol in stock_list:
-
-        df = get_stock_data(symbol)
-
-        if df.empty:
-            continue
-
-        if len(df) < 60:
-            continue
-
-        row = df.iloc[-1]
-
-        close = float(
-            row["Close"]
-        )
-
-        if len(df) >= 2:
-
-            previous_close = float(
-                df["Close"].iloc[-2]
-            )
-
-        else:
-
-            previous_close = close
-
-        if previous_close != 0:
-
-            change_pct = (
-                close /
-                previous_close -
-                1
-            ) * 100
-
-        else:
-
-            change_pct = 0
-
-        volume_ratio = (
-            float(row["VolumeRatio"])
-            if pd.notna(
-                row["VolumeRatio"]
-            )
-            else 1
-        )
-
-        rsi = (
-            float(row["RSI"])
-            if pd.notna(
-                row["RSI"]
-            )
-            else 50
-        )
-
-        ma20 = (
-            float(row["MA20"])
-            if pd.notna(row["MA20"])
-            else np.nan
-        )
-
-        ma60 = (
-            float(row["MA60"])
-            if pd.notna(row["MA60"])
-            else np.nan
-        )
-
-        ma200 = (
-            float(row["MA200"])
-            if pd.notna(row["MA200"])
-            else np.nan
-        )
-
-        high20 = (
-            float(row["High20"])
-            if pd.notna(row["High20"])
-            else np.nan
-        )
-
-        score = calculate_score(row)
-
-        breakout = (
-            pd.notna(high20)
-            and
-            close >= high20
-        )
-
-        volume_up = bool(
-            row["VolumeUp2"]
-        )
-
-        results.append({
-
-            "代號": str(symbol),
-
-            "名稱": stock_name(symbol),
-
-            "市場": stock_market(symbol),
-
-            "價格": close,
-
-            "漲跌幅": change_pct,
-
-            "量比": volume_ratio,
-
-            "RSI": rsi,
-
-            "MA20": ma20,
-
-            "MA60": ma60,
-
-            "MA200": ma200,
-
-            "20日高": high20,
-
-            "突破": breakout,
-
-            "連續量增": volume_up,
-
-            "黑嚕嚕分數": score
-
-        })
-
-    if not results:
-
-        return pd.DataFrame()
-
-    return pd.DataFrame(results)
-
-
-# =========================================================
-# 預設股票
-# =========================================================
-
-if stock_list_df.empty:
-
-    st.error(
-        "stock_list.csv 沒有資料，"
-        "請確認檔案是否存在。"
-    )
-
-    st.stop()
-
-
-DEFAULT_STOCKS = (
-    stock_list_df["股票代號"]
-    .dropna()
-    .astype(str)
-    .str.zfill(4)
-    .tolist()
-)
-
-
-# =========================================================
-# Sidebar
-# =========================================================
-
-st.sidebar.title("🖤 黑嚕嚕")
-
-st.sidebar.caption(
-    "台股盤中雷達 V2.2"
-)
-
-st.sidebar.divider()
-
-
-# =========================================================
-# 市場篩選
-# =========================================================
-
-st.sidebar.subheader(
-    "🏢 市場"
-)
-
-market_options = [
-    "上市",
-    "上櫃",
-    "興櫃"
-]
-
-selected_markets = st.sidebar.multiselect(
-    "選擇市場",
-    market_options,
-    default=["上市", "上櫃"]
-)
-
-
-# =========================================================
-# 雷達策略
-# =========================================================
-
-st.sidebar.subheader(
-    "🎯 雷達策略"
-)
-
-strategy = st.sidebar.selectbox(
-
-    "選擇策略",
-
-    [
-        "全部股票",
-        "🔥 強勢股",
-        "🟢 守護生命線",
-        "🚀 強勢突破",
-        "⚠️ 大量換手高危",
-        "🔴 弱勢股"
-    ]
-
-)
-
-
-# =========================================================
-# 分數
-# =========================================================
-
-st.sidebar.subheader(
-    "🖤 黑嚕嚕條件"
-)
-
-min_score = st.sidebar.slider(
-    "最低黑嚕嚕分數",
-    0,
-    100,
-    50,
-    5
-)
-
-
-# =========================================================
-# 量比
-# =========================================================
-
-min_volume_ratio = st.sidebar.slider(
-    "最低量比",
-    0.5,
-    5.0,
-    1.0,
-    0.1
-)
-
-
-# =========================================================
-# RSI
-# =========================================================
-
-st.sidebar.subheader(
-    "📊 RSI"
-)
-
-rsi_min, rsi_max = st.sidebar.slider(
-    "RSI 範圍",
-    0,
-    100,
-    (30, 80)
-)
-
-
-# =========================================================
-# 漲幅
-# =========================================================
-
-st.sidebar.subheader(
-    "📈 漲跌幅"
-)
-
-change_min, change_max = st.sidebar.slider(
-    "漲跌幅 %",
-    -10.0,
-    10.0,
-    (-10.0, 10.0),
-    0.5
-)
-
-
-# =========================================================
-# 排序
-# =========================================================
-
-sort_options = {
-
-    "黑嚕嚕分數": "黑嚕嚕分數",
-
-    "漲跌幅": "漲跌幅",
-
-    "量比": "量比",
-
-    "RSI": "RSI",
-
-    "價格": "價格"
-
-}
-
-sort_label = st.sidebar.selectbox(
-    "排行榜排序",
-    list(sort_options.keys())
-)
-
-sort_column = sort_options[
-    sort_label
-]
-
-sort_descending = st.sidebar.checkbox(
-    "由高到低",
-    value=True
-)
-
-
-# =========================================================
-# 更新
-# =========================================================
-
-st.sidebar.divider()
-
-st.sidebar.subheader(
-    "🔄 資料更新"
-)
-
-auto_refresh = st.sidebar.checkbox(
-    "啟用自動更新",
-    value=False
-)
-
-refresh_seconds = st.sidebar.selectbox(
-    "更新頻率",
-    [30, 60, 120, 300],
-    index=1
-)
-
-if auto_refresh:
-
+        return pd.DataFrame(columns=['股票代號','股票名稱','市場'])
+
+STOCK_LIST=load_stock_list()
+
+def stock_name(s):
+    if not STOCK_LIST.empty and '股票名稱' in STOCK_LIST.columns:
+        x=STOCK_LIST[STOCK_LIST['股票代號']==str(s).zfill(4)]
+        if not x.empty and str(x.iloc[0]['股票名稱']).strip():return str(x.iloc[0]['股票名稱']).strip()
+    return str(s)
+
+def stock_market(s):
+    if not STOCK_LIST.empty and '市場' in STOCK_LIST.columns:
+        x=STOCK_LIST[STOCK_LIST['股票代號']==str(s).zfill(4)]
+        if not x.empty:return str(x.iloc[0]['市場']).strip()
+    return '未分類'
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_stock_data(symbol):
     try:
-
-        from streamlit_autorefresh import (
-            st_autorefresh
-        )
-
-        st_autorefresh(
-            interval=refresh_seconds * 1000,
-            key="black_heilu_refresh_v22"
-        )
-
-    except ImportError:
-
-        st.warning(
-            "尚未安裝 streamlit-autorefresh。"
-            "請確認 requirements.txt 已包含 "
-            "streamlit-autorefresh。"
-        )
-
-
-# =========================================================
-# 主標題
-# =========================================================
-
-st.markdown(
-    '<div class="main-title">'
-    '🖤 黑嚕嚕－台股盤中雷達'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="sub-title">'
-    'V2.2｜市場篩選 × 趨勢 × 量能 × RSI × 突破'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-
-# =========================================================
-# 目前市場條件
-# =========================================================
-
-if selected_markets:
-
-    market_text = "、".join(
-        selected_markets
-    )
-
-else:
-
-    market_text = "未選擇市場"
-
-
-st.info(
-    f"🏢 市場：{market_text}　｜　"
-    f"🎯 策略：{strategy}　｜　"
-    f"🖤 最低分數：{min_score}"
-)
-
-
-# =========================================================
-# 掃描
-# =========================================================
-
-with st.spinner(
-    "正在掃描股票資料，第一次可能需要一些時間..."
-):
-
-    result_df = scan_stocks(
-        tuple(DEFAULT_STOCKS)
-    )
-
-
-# =========================================================
-# 無資料
-# =========================================================
-
-if result_df.empty:
-
-    st.error(
-        "目前沒有取得股票資料。"
-        "請稍後再試。"
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 市場篩選
-# =========================================================
-
-filtered = result_df.copy()
-
-if selected_markets:
-
-    filtered = filtered[
-        filtered["市場"].isin(
-            selected_markets
-        )
-    ]
-
-else:
-
-    filtered = filtered.iloc[0:0]
-
-
-# =========================================================
-# 基本條件
-# =========================================================
-
-filtered = filtered[
-    filtered["黑嚕嚕分數"] >= min_score
-]
-
-filtered = filtered[
-    filtered["量比"] >= min_volume_ratio
-]
-
-filtered = filtered[
-    filtered["RSI"].between(
-        rsi_min,
-        rsi_max
-    )
-]
-
-filtered = filtered[
-    filtered["漲跌幅"].between(
-        change_min,
-        change_max
-    )
-]
-
-
-# =========================================================
-# 策略
-# =========================================================
-
-if strategy == "🔥 強勢股":
-
-    filtered = filtered[
-        filtered["漲跌幅"] >= 2
-    ]
-
-
-elif strategy == "🟢 守護生命線":
-
-    filtered = filtered[
-        (
-            filtered["價格"]
-            >
-            filtered["MA20"]
-        )
-        &
-        (
-            filtered["MA20"]
-            >
-            filtered["MA60"]
-        )
-    ]
-
-
-elif strategy == "🚀 強勢突破":
-
-    filtered = filtered[
-        filtered["突破"] == True
-    ]
-
-
-elif strategy == "⚠️ 大量換手高危":
-
-    filtered = filtered[
-        filtered["量比"] >= 2
-    ]
-
-
-elif strategy == "🔴 弱勢股":
-
-    filtered = filtered[
-        filtered["漲跌幅"] <= -2
-    ]
-
-
-# =========================================================
-# 排序
-# =========================================================
-
-filtered = filtered.sort_values(
-    sort_column,
-    ascending=not sort_descending
-)
-
-
-# =========================================================
-# KPI
-# =========================================================
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-
-with col1:
-
-    st.metric(
-        "掃描股票",
-        len(result_df)
-    )
-
-
-with col2:
-
-    st.metric(
-        "符合條件",
-        len(filtered)
-    )
-
-
-with col3:
-
-    if not result_df.empty:
-
-        strongest = result_df.loc[
-            result_df["漲跌幅"].idxmax()
-        ]
-
-        st.metric(
-            "最高漲幅",
-            f"{strongest['漲跌幅']:.2f}%"
-        )
-
+        d=yf.download(f'{str(symbol).zfill(4)}.TW',period='1y',interval='1d',auto_adjust=False,progress=False,threads=False)
+        if d is None or d.empty:return None
+        if isinstance(d.columns,pd.MultiIndex):d.columns=d.columns.get_level_values(0)
+        cols=['Open','High','Low','Close','Volume']
+        if any(c not in d.columns for c in cols):return None
+        d=d[cols].copy().dropna(subset=['Close'])
+        if len(d)<200:return None
+        d.index=pd.to_datetime(d.index);d.index.name='Date'
+        for c in cols:d[c]=pd.to_numeric(d[c],errors='coerce')
+        return d.dropna(subset=['Close'])
+    except Exception:return None
+
+def indicators(d):
+    d=d.copy()
+    d['MA20']=d.Close.rolling(20).mean();d['MA60']=d.Close.rolling(60).mean();d['MA200']=d.Close.rolling(200).mean()
+    delta=d.Close.diff();gain=delta.clip(lower=0);loss=-delta.clip(upper=0)
+    ag=gain.rolling(14).mean();al=loss.rolling(14).mean();rs=ag/al.replace(0,np.nan)
+    d['RSI']=100-(100/(1+rs));d['VOL_MA20']=d.Volume.rolling(20).mean();d['VOL_RATIO']=d.Volume/d.VOL_MA20.replace(0,np.nan)
+    d['CHANGE']=d.Close.pct_change()*100;d['HIGH20']=d.High.shift(1).rolling(20).max();d['HIGH60']=d.High.shift(1).rolling(60).max()
+    up=d.Volume>d.Volume.shift(1);cnt=[];n=0
+    for f in up.fillna(False):n=n+1 if f else 0;cnt.append(n)
+    d['CONSEC_VOL']=cnt;d['MA20_SLOPE']=d.MA20-d.MA20.shift(5);d['MA60_SLOPE']=d.MA60-d.MA60.shift(5)
+    return d
+
+def score_level(s):
+    return '🟣 黑嚕嚕超強' if s>=90 else '🔥 強勢' if s>=80 else '🚀 注意' if s>=70 else '👀 觀察' if s>=60 else '⚪ 一般'
+
+def black_score(d):
+    x=d.iloc[-1];close=x.Close;ma20=x.MA20;ma60=x.MA60;ma200=x.MA200;rsi=x.RSI;vr=x.VOL_RATIO;chg=x.CHANGE;h20=x.HIGH20;h60=x.HIGH60
+    trend=momentum=volume=breakout=rsi_s=extra=0;reasons=[]
+    if pd.notna(ma20) and close>ma20:trend+=8;reasons.append('站上MA20')
+    if pd.notna(ma60) and close>ma60:trend+=7;reasons.append('站上MA60')
+    if pd.notna(ma200) and close>ma200:trend+=5;reasons.append('站上MA200')
+    if pd.notna(ma20) and pd.notna(ma60) and ma20>ma60:trend+=5;reasons.append('MA20>MA60')
+    if pd.notna(ma20) and pd.notna(ma60) and pd.notna(ma200) and ma20>ma60>ma200:trend+=5;reasons.append('多頭排列')
+    if pd.notna(chg):
+        if chg>=5:momentum+=8;reasons.append('強勢上漲')
+        elif chg>=3:momentum+=6;reasons.append('明顯上漲')
+        elif chg>=1:momentum+=4;reasons.append('今日偏強')
+        elif chg>0:momentum+=2
+    if pd.notna(x.MA20_SLOPE) and x.MA20_SLOPE>0:momentum+=5;reasons.append('MA20上彎')
+    if pd.notna(x.MA60_SLOPE) and x.MA60_SLOPE>0:momentum+=4;reasons.append('MA60上彎')
+    if pd.notna(ma20) and close>ma20*1.03:momentum+=3;reasons.append('脫離生命線')
+    if pd.notna(vr):
+        if vr>=3:volume+=20;reasons.append('3倍以上爆量')
+        elif vr>=2:volume+=15;reasons.append('2倍以上放量')
+        elif vr>=1.5:volume+=10;reasons.append('明顯量增')
+        elif vr>=1.2:volume+=6;reasons.append('量能增加')
+        elif vr>=1:volume+=3
+    if pd.notna(h20) and close>=h20:breakout+=10;reasons.append('突破20日高點')
+    elif pd.notna(h20) and close>=h20*.98:breakout+=6;reasons.append('接近20日高點')
+    if pd.notna(h60) and close>=h60:breakout+=5;reasons.append('突破60日高點')
+    if pd.notna(rsi):
+        if 55<=rsi<=70:rsi_s+=10;reasons.append('RSI健康偏強')
+        elif 50<=rsi<55:rsi_s+=7;reasons.append('RSI轉強')
+        elif 70<rsi<=78:rsi_s+=6;reasons.append('RSI強勢')
+        elif 45<=rsi<50:rsi_s+=3
+        elif rsi>78:rsi_s+=1;reasons.append('RSI偏熱')
+    if int(x.CONSEC_VOL)>=3:extra+=2;reasons.append('連續3日量增')
+    elif int(x.CONSEC_VOL)>=2:extra+=1
+    if pd.notna(ma20) and pd.notna(ma60) and close>ma20>ma60 and pd.notna(chg) and chg>0:extra+=2
+    if pd.notna(vr) and pd.notna(chg) and vr>=1.5 and chg>2:extra+=1
+    total=int(min(100,max(0,trend+momentum+volume+breakout+rsi_s+extra)))
+    return total,{'趨勢':trend,'動能':momentum,'成交量':volume,'突破':breakout,'RSI':rsi_s,'額外強度':extra},reasons
+
+def signals(d,score):
+    x=d.iloc[-1];close=x.Close;ma20=x.MA20;ma60=x.MA60;ma200=x.MA200;rsi=x.RSI;vr=x.VOL_RATIO;chg=x.CHANGE;h20=x.HIGH20;s=[]
+    if pd.notna(h20) and close>=h20 and pd.notna(vr) and vr>=1.3 and pd.notna(chg) and chg>0:s.append('🚀 強勢突破')
+    if pd.notna(ma20) and pd.notna(ma60) and pd.notna(ma200) and close>ma20>ma60>ma200 and pd.notna(vr) and vr>=1.1 and pd.notna(rsi) and 50<=rsi<=78:s.append('🔥 主升段')
+    if pd.notna(ma20) and pd.notna(ma200) and close>=ma20*.98 and close<=ma20*1.03 and close>=ma200 and pd.notna(rsi) and rsi>=45:s.append('🟢 守護生命線')
+    if pd.notna(vr) and vr>=2 and pd.notna(chg) and chg>=3 and ((pd.notna(rsi) and rsi>=78) or vr>=3):s.append('⚠️ 爆量高危')
+    weak=(pd.notna(ma20) and close<ma20) or (pd.notna(ma60) and pd.notna(ma200) and ma60<ma200) or (pd.notna(chg) and chg<=-3 and pd.notna(vr) and vr>=1.3)
+    if weak and score<60:s.append('🔴 趨勢轉弱')
+    if not s:s.append(score_level(score))
+    return s
+
+def build_row(symbol,df):
+    if df is None or len(df)<200:return None
+    d=indicators(df);x=d.iloc[-1];score,bd,reasons=black_score(d);sig=signals(d,score)
+    return {'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'市場':stock_market(symbol),'價格':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0,'成交量':float(x.Volume),'量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0.0,'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,'MA20':float(x.MA20) if pd.notna(x.MA20) else np.nan,'MA60':float(x.MA60) if pd.notna(x.MA60) else np.nan,'MA200':float(x.MA200) if pd.notna(x.MA200) else np.nan,'連量':int(x.CONSEC_VOL),'20日高':float(x.HIGH20) if pd.notna(x.HIGH20) else np.nan,'60日高':float(x.HIGH60) if pd.notna(x.HIGH60) else np.nan,'黑嚕嚕分數':score,'等級':score_level(score),'訊號':'、'.join(sig),'判斷':'、'.join(dict.fromkeys(reasons[:8])),'趨勢分':bd['趨勢'],'動能分':bd['動能'],'量能分':bd['成交量'],'突破分':bd['突破'],'RSI分':bd['RSI'],'額外分':bd['額外強度'],'_df':d}
+
+# Sidebar
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.0｜雷達大腦版')
+mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
+markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃'])
+max_n=st.sidebar.slider('最多掃描股票數',10,200,60,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
+change_range=st.sidebar.slider('漲跌幅範圍 (%)',-10.0,10.0,(-10.0,10.0),0.5);rsi_range=st.sidebar.slider('RSI 範圍',0,100,(0,100),1)
+sort_mode=st.sidebar.selectbox('排行榜排序',['黑嚕嚕分數','漲跌幅','量比','RSI','價格']);auto=st.sidebar.checkbox('自動刷新',value=False);refresh=st.sidebar.select_slider('刷新秒數',options=[30,60,120,180,300],value=120)
+stock_text=st.sidebar.text_area('股票池（逗號／空白／換行皆可）',DEFAULT_STOCKS,height=180)
+if auto:st_autorefresh(interval=refresh*1000,key='black_radar_refresh')
+
+raw=stock_text.replace('\n',',').replace(' ',',').replace('，',',').replace('、',',').split(',');symbols=[]
+for s in raw:
+    s=s.strip()
+    if s.isdigit() and s.zfill(4) not in symbols:symbols.append(s.zfill(4))
+symbols=symbols[:max_n]
+
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.0｜雷達核心版；目前資料仍為 yfinance 日資料，V4 再接 Fugle 即時行情。')
+a,b,c,d,e=st.columns(5);a.metric('股票池',f'{len(symbols)} 檔');b.metric('最低分數',min_score);c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
+
+rows=[];p=st.progress(0);status=st.empty()
+for i,s in enumerate(symbols):
+    status.text(f'正在掃描：{s} {stock_name(s)}　({i+1}/{len(symbols)})');df=get_stock_data(s)
+    if df is None: p.progress((i+1)/max(len(symbols),1));continue
+    r=build_row(s,df)
+    if r:
+        sig=r['訊號'];market_ok=(not markets or r['市場'] in markets or r['市場']=='未分類');change_ok=change_range[0]<=r['漲跌%']<=change_range[1];rsi_ok=pd.isna(r['RSI']) or rsi_range[0]<=r['RSI']<=rsi_range[1];base=r['黑嚕嚕分數']>=min_score and r['量比']>=min_vr and change_ok and rsi_ok and market_ok
+        mode_ok={'全部股票':True,'🟣 黑嚕嚕超強':r['黑嚕嚕分數']>=90,'🔥 強勢股':r['黑嚕嚕分數']>=80 and r['漲跌%']>0,'🚀 強勢突破':'🚀 強勢突破' in sig,'🔥 主升段':'🔥 主升段' in sig,'🟢 守護生命線':'🟢 守護生命線' in sig,'⚠️ 大量換手高危':'⚠️ 爆量高危' in sig,'🔴 趨勢轉弱':'🔴 趨勢轉弱' in sig}.get(mode,True)
+        if base and mode_ok:rows.append(r)
+    p.progress((i+1)/max(len(symbols),1))
+status.empty();p.empty()
+if not rows:st.warning('目前沒有符合條件的股票。可以降低最低黑嚕嚕分數、量比、RSI／漲跌幅，或增加股票池。');st.stop()
+result=pd.DataFrame(rows);sort_col={'黑嚕嚕分數':'黑嚕嚕分數','漲跌幅':'漲跌%','量比':'量比','RSI':'RSI','價格':'價格'}[sort_mode];result=result.sort_values(sort_col,ascending=False,na_position='last').reset_index(drop=True)
+
+strong=int((result['黑嚕嚕分數']>=80).sum());breakout=int(result['訊號'].str.contains('🚀 強勢突破',regex=False).sum());risk=int(result['訊號'].str.contains('⚠️ 爆量高危',regex=False).sum());weak=int(result['訊號'].str.contains('🔴 趨勢轉弱',regex=False).sum())
+a,b,c,d,e=st.columns(5);a.metric('符合條件',f'{len(result)} 檔');b.metric('🔥 80分以上',f'{strong} 檔');c.metric('🚀 突破',f'{breakout} 檔');d.metric('⚠️ 高危',f'{risk} 檔');e.metric('🔴 轉弱',f'{weak} 檔');st.divider()
+
+st.subheader('🖤 黑嚕嚕焦點');top=result.head(4);cols=st.columns(len(top))
+for col,(_,r) in zip(cols,top.iterrows()):
+    icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
+    with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　RSI {r['RSI']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
+
+t1,t2,t3,t4,t5=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股'])
+with t1:
+    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','RSI','黑嚕嚕分數','等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['RSI']=show['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
+    st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
+with t2:
+    st.subheader('🚨 黑嚕嚕訊號中心')
+    for title,key in [('🚀 強勢突破','🚀 強勢突破'),('🔥 主升段','🔥 主升段'),('🟢 守護生命線','🟢 守護生命線'),('⚠️ 爆量高危','⚠️ 爆量高危'),('🔴 趨勢轉弱','🔴 趨勢轉弱')]:
+        g=result[result['訊號'].str.contains(key,regex=False)].copy();st.markdown(f'### {title}　{len(g)} 檔')
+        if g.empty:st.info('目前沒有符合這個訊號的股票。')
+        else:
+            q=g[['股票','名稱','價格','漲跌%','量比','RSI','黑嚕嚕分數','判斷']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['RSI']=q['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
+with t3:
+    st.subheader('📊 黑嚕嚕分數拆解');s=st.selectbox('選擇股票',result['股票'].tolist(),key='score_stock');r=result[result['股票']==s].iloc[0]
+    st.markdown(f"### 🖤 {r['股票']} {r['名稱']}　{r['黑嚕嚕分數']} / 100　{r['等級']}")
+    q=pd.DataFrame({'項目':['📈 趨勢','⚡ 動能','🔊 成交量','🚀 突破','RSI','⭐ 額外強度'],'得分':[r['趨勢分'],r['動能分'],r['量能分'],r['突破分'],r['RSI分'],r['額外分']],'滿分':[30,20,20,15,10,5]});st.dataframe(q,use_container_width=True,hide_index=True)
+    c1,c2=st.columns(2);c1.metric('總分',f"{r['黑嚕嚕分數']} / 100");c1.metric('量比',f"{r['量比']:.2f}x");c1.metric('RSI',f"{r['RSI']:.1f}" if pd.notna(r['RSI']) else '-');c2.metric('20日高點',f"{r['20日高']:.2f}" if pd.notna(r['20日高']) else '-');c2.metric('MA20',f"{r['MA20']:.2f}" if pd.notna(r['MA20']) else '-');c2.metric('MA200',f"{r['MA200']:.2f}" if pd.notna(r['MA200']) else '-')
+    st.markdown('**目前主要判斷**');[st.write(f'• {x}') for x in r['判斷'].split('、') if x]
+with t4:
+    st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
+    st.line_chart(d[['Close','MA20','MA60','MA200']].rename(columns={'Close':'股價'}),height=420);a,b,c,d2,e=st.columns(5);a.metric('黑嚕嚕',f"{r['黑嚕嚕分數']}分");b.metric('量比',f"{r['量比']:.2f}x");c.metric('RSI',f"{r['RSI']:.1f}" if pd.notna(r['RSI']) else '-');d2.metric('MA20',f"{r['MA20']:.2f}");e.metric('MA200',f"{r['MA200']:.2f}");st.markdown('#### 🔊 成交量');st.line_chart(d[['Volume','VOL_MA20']].rename(columns={'Volume':'成交量','VOL_MA20':'20日均量'}),height=250);st.markdown('#### 🚨 目前訊號');st.info(r['訊號']);st.markdown('#### 🧠 黑嚕嚕判讀');st.write(r['判斷'] or '目前沒有額外判讀。')
+with t5:
+    st.subheader('⭐ 自選股');watch=st.multiselect('加入自選股',result['股票'].tolist(),default=[],key='watchlist')
+    if not watch:st.info('請從上方選擇股票加入自選股。')
     else:
+        q=result[result['股票'].isin(watch)].sort_values('黑嚕嚕分數',ascending=False)[['股票','名稱','價格','漲跌%','量比','RSI','黑嚕嚕分數','等級','訊號']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['RSI']=q['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
 
-        st.metric(
-            "最高漲幅",
-            "-"
-        )
-
-
-with col4:
-
-    avg_volume = (
-        result_df["量比"].mean()
-    )
-
-    st.metric(
-        "平均量比",
-        f"{avg_volume:.2f}x"
-    )
-
-
-with col5:
-
-    max_score = (
-        result_df["黑嚕嚕分數"].max()
-    )
-
-    st.metric(
-        "最高分數",
-        f"{max_score:.0f}"
-    )
-
-
-st.divider()
-
-
-# =========================================================
-# Tabs
-# =========================================================
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "📋 盤中排行榜",
-        "🚨 警報中心",
-        "📈 個股分析",
-        "⭐ 自選股"
-    ]
-)
-
-
-# =========================================================
-# TAB 1
-# =========================================================
-
-with tab1:
-
-    st.markdown(
-        '<div class="section-title">'
-        '📋 黑嚕嚕排行榜'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    if filtered.empty:
-
-        st.warning(
-            "目前沒有符合條件的股票。"
-            "可以降低分數、量比或 RSI 條件。"
-        )
-
-    else:
-
-        display_df = filtered.copy()
-
-        display_df["價格"] = (
-            display_df["價格"]
-            .round(2)
-        )
-
-        display_df["漲跌幅"] = (
-            display_df["漲跌幅"]
-            .round(2)
-        )
-
-        display_df["量比"] = (
-            display_df["量比"]
-            .round(2)
-        )
-
-        display_df["RSI"] = (
-            display_df["RSI"]
-            .round(1)
-        )
-
-        display_df["黑嚕嚕分數"] = (
-            display_df["黑嚕嚕分數"]
-            .astype(int)
-        )
-
-        display_df = display_df[
-            [
-                "代號",
-                "名稱",
-                "市場",
-                "價格",
-                "漲跌幅",
-                "量比",
-                "RSI",
-                "突破",
-                "連續量增",
-                "黑嚕嚕分數"
-            ]
-        ]
-
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            height=600
-        )
-
-
-# =========================================================
-# TAB 2
-# =========================================================
-
-with tab2:
-
-    st.markdown(
-        '<div class="section-title">'
-        '🚨 黑嚕嚕警報中心'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    alerts = []
-
-    for _, row in result_df.iterrows():
-
-        symbol = row["代號"]
-        name = row["名稱"]
-
-        # 爆量
-        if row["量比"] >= 3:
-
-            alerts.append(
-                f"🔥 {symbol} {name}｜"
-                f"爆量｜量比 "
-                f"{row['量比']:.2f}x"
-            )
-
-        elif row["量比"] >= 2:
-
-            alerts.append(
-                f"🟠 {symbol} {name}｜"
-                f"明顯量增｜量比 "
-                f"{row['量比']:.2f}x"
-            )
-
-        # 大漲
-        if row["漲跌幅"] >= 5:
-
-            alerts.append(
-                f"🚀 {symbol} {name}｜"
-                f"強勢上漲 "
-                f"{row['漲跌幅']:.2f}%"
-            )
-
-        # 急跌
-        if row["漲跌幅"] <= -5:
-
-            alerts.append(
-                f"🔴 {symbol} {name}｜"
-                f"急跌 "
-                f"{row['漲跌幅']:.2f}%"
-            )
-
-        # 突破
-        if row["突破"]:
-
-            alerts.append(
-                f"🚀 {symbol} {name}｜"
-                "突破20日高點"
-            )
-
-        # 連量
-        if row["連續量增"]:
-
-            alerts.append(
-                f"📈 {symbol} {name}｜"
-                "連續量增"
-            )
-
-
-    if not alerts:
-
-        st.success(
-            "目前沒有特殊警報。"
-        )
-
-    else:
-
-        for alert in alerts[:100]:
-
-            st.markdown(
-                f'<div class="alert-box">'
-                f'{alert}'
-                f'</div>',
-                unsafe_allow_html=True
-            )
-
-
-# =========================================================
-# TAB 3
-# =========================================================
-
-with tab3:
-
-    st.markdown(
-        '<div class="section-title">'
-        '📈 個股技術分析'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    selected_symbol = st.selectbox(
-
-        "選擇股票",
-
-        DEFAULT_STOCKS,
-
-        format_func=lambda x:
-            f"{x}｜{stock_name(x)}｜"
-            f"{stock_market(x)}"
-    )
-
-
-    selected_df = get_stock_data(
-        selected_symbol
-    )
-
-
-    if selected_df.empty:
-
-        st.warning(
-            "無法取得這檔股票的資料。"
-        )
-
-    else:
-
-        latest = selected_df.iloc[-1]
-
-        current_price = float(
-            latest["Close"]
-        )
-
-        current_rsi = float(
-            latest["RSI"]
-        )
-
-        current_volume_ratio = float(
-            latest["VolumeRatio"]
-        )
-
-        current_score = calculate_score(
-            latest
-        )
-
-        # -------------------------------------------------
-        # 股票名稱
-        # -------------------------------------------------
-
-        st.markdown(
-            f"## {selected_symbol}｜"
-            f"{stock_name(selected_symbol)}"
-        )
-
-        st.caption(
-            f"市場：{stock_market(selected_symbol)}"
-        )
-
-
-        # -------------------------------------------------
-        # KPI
-        # -------------------------------------------------
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-
-            st.metric(
-                "目前價格",
-                f"{current_price:.2f}"
-            )
-
-        with c2:
-
-            st.metric(
-                "RSI",
-                f"{current_rsi:.1f}"
-            )
-
-        with c3:
-
-            st.metric(
-                "量比",
-                f"{current_volume_ratio:.2f}x"
-            )
-
-        with c4:
-
-            st.metric(
-                "🖤 黑嚕嚕",
-                f"{current_score}/100"
-            )
-
-
-        st.divider()
-
-
-        # -------------------------------------------------
-        # 股價＋均線
-        # -------------------------------------------------
-
-        st.subheader(
-            "📈 股價與均線"
-        )
-
-        chart_df = selected_df[
-            [
-                "Close",
-                "MA20",
-                "MA60",
-                "MA200"
-            ]
-        ].copy()
-
-        chart_df.columns = [
-            "股價",
-            "MA20",
-            "MA60",
-            "MA200"
-        ]
-
-        st.line_chart(
-            chart_df,
-            height=450
-        )
-
-
-        # -------------------------------------------------
-        # RSI
-        # -------------------------------------------------
-
-        st.subheader(
-            "📊 RSI"
-        )
-
-        rsi_chart = (
-            selected_df[["RSI"]]
-            .copy()
-        )
-
-        st.line_chart(
-            rsi_chart,
-            height=250
-        )
-
-
-        # -------------------------------------------------
-        # 成交量
-        # -------------------------------------------------
-
-        st.subheader(
-            "📊 成交量"
-        )
-
-        volume_chart = (
-            selected_df[["Volume"]]
-            .copy()
-        )
-
-        st.bar_chart(
-            volume_chart,
-            height=250
-        )
-
-
-# =========================================================
-# TAB 4
-# =========================================================
-
-with tab4:
-
-    st.markdown(
-        '<div class="section-title">'
-        '⭐ 我的自選股'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-
-    watchlist = st.multiselect(
-
-        "選擇自選股票",
-
-        DEFAULT_STOCKS,
-
-        default=[
-            x
-            for x in [
-                "2330",
-                "2308",
-                "2317",
-                "2454"
-            ]
-            if x in DEFAULT_STOCKS
-        ],
-
-        format_func=lambda x:
-            f"{x}｜{stock_name(x)}"
-    )
-
-
-    if watchlist:
-
-        watch_df = result_df[
-            result_df["代號"]
-            .isin(watchlist)
-        ].copy()
-
-
-        watch_df = watch_df.sort_values(
-            "黑嚕嚕分數",
-            ascending=False
-        )
-
-
-        watch_df["價格"] = (
-            watch_df["價格"]
-            .round(2)
-        )
-
-        watch_df["漲跌幅"] = (
-            watch_df["漲跌幅"]
-            .round(2)
-        )
-
-        watch_df["量比"] = (
-            watch_df["量比"]
-            .round(2)
-        )
-
-        watch_df["RSI"] = (
-            watch_df["RSI"]
-            .round(1)
-        )
-
-
-        st.dataframe(
-
-            watch_df[
-                [
-                    "代號",
-                    "名稱",
-                    "市場",
-                    "價格",
-                    "漲跌幅",
-                    "量比",
-                    "RSI",
-                    "黑嚕嚕分數"
-                ]
-            ],
-
-            use_container_width=True,
-
-            hide_index=True
-        )
-
-    else:
-
-        st.info(
-            "請選擇你的自選股票。"
-        )
-
-
-# =========================================================
-# Footer
-# =========================================================
-
-st.divider()
-
-st.caption(
-    "🖤 黑嚕嚕－台股盤中雷達 V2.2｜"
-    f"頁面更新時間："
-    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-)
-
-st.caption(
-    "⚠️ 本工具目前使用公開市場資料進行研究分析，"
-    "不構成投資建議。"
-)
+st.divider();st.caption('🖤 黑嚕嚕 V3.0｜目前使用 yfinance 日資料建立雷達邏輯。V3.x 先完成訊號與雷達功能；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
