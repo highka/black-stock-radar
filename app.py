@@ -2,12 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import requests
+import re
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.2
-# B 路線：先完成雷達核心，V4 再接 Fugle 即時行情
+# 🖤 黑嚕嚕－台股盤中雷達 V3.3
+# V3.3：全市場股票池自動同步（上市／上櫃／興櫃），V4 再接 Fugle 即時行情
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -37,22 +39,72 @@ def load_stock_list():
 
 STOCK_LIST=load_stock_list()
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_market_universe():
+    """從 TWSE / TPEx 官方 OpenAPI 自動建立上市、上櫃、興櫃公司股票池。
+    API 失敗時回退至 stock_list.csv，避免整個雷達無法啟動。
+    """
+    sources = [
+        ('上市', 'https://openapi.twse.com.tw/v1/opendata/t187ap03_L'),
+        ('上櫃', 'https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O'),
+        ('興櫃', 'https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R'),
+    ]
+    rows=[]
+    source_status=[]
+    for market,url in sources:
+        try:
+            r=requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'})
+            r.raise_for_status()
+            data=r.json()
+            if isinstance(data,dict):
+                data=data.get('data',data.get('results',[]))
+            if not isinstance(data,list):
+                raise ValueError('API 回傳格式不是清單')
+            for item in data:
+                if not isinstance(item,dict): continue
+                code=''; name=''
+                if market=='上市':
+                    code=item.get('公司代號',item.get('SecuritiesCompanyCode',''))
+                    name=item.get('公司簡稱',item.get('CompanyAbbreviation',item.get('公司名稱','')))
+                else:
+                    code=item.get('SecuritiesCompanyCode',item.get('公司代號',''))
+                    name=item.get('CompanyAbbreviation',item.get('公司簡稱',item.get('CompanyName','')))
+                code=str(code).strip().upper()
+                name=str(name).strip()
+                if re.fullmatch(r'[0-9A-Z]{4,6}',code) and name:
+                    rows.append({'股票代號':code,'股票名稱':name,'市場':market})
+            source_status.append(f'{market}：成功')
+        except Exception as e:
+            source_status.append(f'{market}：失敗（{type(e).__name__}）')
+    d=pd.DataFrame(rows,columns=['股票代號','股票名稱','市場']).drop_duplicates('股票代號')
+    if d.empty:
+        d=STOCK_LIST.copy()
+        if not d.empty:
+            source_status=['官方 API 目前無法取得，已回退 stock_list.csv']
+        else:
+            source_status=['官方 API 與 stock_list.csv 都無資料']
+    return d, source_status
+
+
+UNIVERSE, UNIVERSE_STATUS = load_market_universe()
+
 def stock_name(s):
-    if not STOCK_LIST.empty and '股票名稱' in STOCK_LIST.columns:
-        x=STOCK_LIST[STOCK_LIST['股票代號']==str(s).zfill(4)]
+    if not UNIVERSE.empty and '股票名稱' in UNIVERSE.columns:
+        x=UNIVERSE[UNIVERSE['股票代號']==str(s).zfill(4)]
         if not x.empty and str(x.iloc[0]['股票名稱']).strip():return str(x.iloc[0]['股票名稱']).strip()
     return str(s)
 
 def stock_market(s):
-    if not STOCK_LIST.empty and '市場' in STOCK_LIST.columns:
-        x=STOCK_LIST[STOCK_LIST['股票代號']==str(s).zfill(4)]
+    if not UNIVERSE.empty and '市場' in UNIVERSE.columns:
+        x=UNIVERSE[UNIVERSE['股票代號']==str(s).zfill(4)]
         if not x.empty:return str(x.iloc[0]['市場']).strip()
     return '未分類'
 
 @st.cache_data(ttl=900, show_spinner=False)
-def get_stock_data(symbol):
+def get_stock_data(symbol, market=None):
     try:
-        d=yf.download(f'{str(symbol).zfill(4)}.TW',period='2y',interval='1d',auto_adjust=False,progress=False,threads=False)
+        suffix='.TWO' if market in ['上櫃','興櫃'] else '.TW'
+        d=yf.download(f'{str(symbol).zfill(4)}{suffix}',period='2y',interval='1d',auto_adjust=False,progress=False,threads=False)
         if d is None or d.empty:return None
         if isinstance(d.columns,pd.MultiIndex):d.columns=d.columns.get_level_values(0)
         cols=['Open','High','Low','Close','Volume']
@@ -248,27 +300,38 @@ def overall_backtest_stats(events):
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.2｜雷達＋訊號回測版')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3｜全市場股票池＋V3.2 回測')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
-markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃'])
-max_n=st.sidebar.slider('最多掃描股票數',10,200,60,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
+markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
+if st.sidebar.button('🔄 更新全市場股票池'):
+    load_market_universe.clear()
+    st.rerun()
+counts=UNIVERSE['市場'].value_counts().to_dict() if not UNIVERSE.empty else {}
+st.sidebar.caption(f"官方股票池：上市 {counts.get('上市',0)}｜上櫃 {counts.get('上櫃',0)}｜興櫃 {counts.get('興櫃',0)}")
+max_n=st.sidebar.slider('最多掃描股票數',10,500,150,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
 change_range=st.sidebar.slider('漲跌幅範圍 (%)',-10.0,10.0,(-10.0,10.0),0.5);rsi_range=st.sidebar.slider('RSI 範圍',0,100,(0,100),1)
 sort_mode=st.sidebar.selectbox('排行榜排序',['黑嚕嚕分數','漲跌幅','量比','RSI','價格']);auto=st.sidebar.checkbox('自動刷新',value=False);refresh=st.sidebar.select_slider('刷新秒數',options=[30,60,120,180,300],value=120)
-stock_text=st.sidebar.text_area('股票池（逗號／空白／換行皆可）',DEFAULT_STOCKS,height=180)
+universe_codes=UNIVERSE['股票代號'].tolist() if not UNIVERSE.empty else DEFAULT_STOCKS.split(',')
+stock_text=st.sidebar.text_area('股票池（官方全市場自動同步，可自行縮小）',','.join(universe_codes),height=180)
 if auto:st_autorefresh(interval=refresh*1000,key='black_radar_refresh')
 
 raw=stock_text.replace('\n',',').replace(' ',',').replace('，',',').replace('、',',').split(',');symbols=[]
 for s in raw:
     s=s.strip()
     if s.isdigit() and s.zfill(4) not in symbols:symbols.append(s.zfill(4))
+# 依市場選擇與股票池順序過濾
+market_map=dict(zip(UNIVERSE['股票代號'],UNIVERSE['市場'])) if not UNIVERSE.empty else {}
+if not STOCK_LIST.empty and '股票代號' in STOCK_LIST.columns and '市場' in STOCK_LIST.columns:
+    market_map.update(dict(zip(STOCK_LIST['股票代號'].astype(str).str.zfill(4),STOCK_LIST['市場'])))
+symbols=[x for x in symbols if not markets or market_map.get(x,'未分類') in markets]
 symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.2｜雷達核心版；目前資料仍為 yfinance 日資料，V4 再接 Fugle 即時行情。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3｜股票池自動同步 TWSE／TPEx 上市、上櫃、興櫃；行情仍為 yfinance 日資料。')
 a,b,c,d,e=st.columns(5);a.metric('股票池',f'{len(symbols)} 檔');b.metric('最低分數',min_score);c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
 
 rows=[];p=st.progress(0);status=st.empty()
 for i,s in enumerate(symbols):
-    status.text(f'正在掃描：{s} {stock_name(s)}　({i+1}/{len(symbols)})');df=get_stock_data(s)
+    status.text(f'正在掃描：{s} {stock_name(s)}　({i+1}/{len(symbols)})');df=get_stock_data(s, market_map.get(s))
     if df is None: p.progress((i+1)/max(len(symbols),1));continue
     r=build_row(s,df)
     if r:
@@ -335,7 +398,7 @@ with t6:
             bt_symbols=symbols[:bt_n]
             for i,sym in enumerate(bt_symbols):
                 bt_status.text(f'正在回測：{sym} {stock_name(sym)}　({i+1}/{len(bt_symbols)})')
-                bdf=get_stock_data(sym)
+                bdf=get_stock_data(sym, market_map.get(sym))
                 if bdf is not None:
                     ev=run_backtest(sym,bdf,bt_horizon,bt_gap,bt_signals,bt_min_score)
                     if not ev.empty: all_events.append(ev)
@@ -371,4 +434,4 @@ with t6:
     else:
         st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.2｜目前使用 yfinance 日資料建立雷達邏輯。V3.x 先完成訊號與雷達功能；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3｜股票池自動同步上市／上櫃／興櫃；技術資料使用 yfinance 日資料。V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
