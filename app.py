@@ -6,7 +6,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.0
+# 🖤 黑嚕嚕－台股盤中雷達 V3.2
 # B 路線：先完成雷達核心，V4 再接 Fugle 即時行情
 # ============================================================
 
@@ -52,7 +52,7 @@ def stock_market(s):
 @st.cache_data(ttl=900, show_spinner=False)
 def get_stock_data(symbol):
     try:
-        d=yf.download(f'{str(symbol).zfill(4)}.TW',period='1y',interval='1d',auto_adjust=False,progress=False,threads=False)
+        d=yf.download(f'{str(symbol).zfill(4)}.TW',period='2y',interval='1d',auto_adjust=False,progress=False,threads=False)
         if d is None or d.empty:return None
         if isinstance(d.columns,pd.MultiIndex):d.columns=d.columns.get_level_values(0)
         cols=['Open','High','Low','Close','Volume']
@@ -133,8 +133,122 @@ def build_row(symbol,df):
     d=indicators(df);x=d.iloc[-1];score,bd,reasons=black_score(d);sig=signals(d,score)
     return {'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'市場':stock_market(symbol),'價格':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0,'成交量':float(x.Volume),'量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0.0,'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,'MA20':float(x.MA20) if pd.notna(x.MA20) else np.nan,'MA60':float(x.MA60) if pd.notna(x.MA60) else np.nan,'MA200':float(x.MA200) if pd.notna(x.MA200) else np.nan,'連量':int(x.CONSEC_VOL),'20日高':float(x.HIGH20) if pd.notna(x.HIGH20) else np.nan,'60日高':float(x.HIGH60) if pd.notna(x.HIGH60) else np.nan,'黑嚕嚕分數':score,'等級':score_level(score),'訊號':'、'.join(sig),'判斷':'、'.join(dict.fromkeys(reasons[:8])),'趨勢分':bd['趨勢'],'動能分':bd['動能'],'量能分':bd['成交量'],'突破分':bd['突破'],'RSI分':bd['RSI'],'額外分':bd['額外強度'],'_df':d}
 
+
+# ============================================================
+# 🧪 V3.2 歷史訊號回測引擎
+# ============================================================
+
+SIGNAL_LABELS = [
+    '🚀 強勢突破','🚀 60日突破','👀 接近突破','🔥 主升段',
+    '🟢 守護生命線','⚠️ 爆量高危','⚠️ 爆量突破','⚠️ 爆量過熱',
+    '⚠️ 爆量下跌','🔴 趨勢轉弱'
+]
+
+def historical_signal_events(df):
+    """逐日重算指標與訊號，避免使用未來資料。"""
+    if df is None or len(df) < 210:
+        return pd.DataFrame()
+    base = df.copy()
+    events = []
+    for i in range(200, len(base)):
+        hist = base.iloc[:i+1].copy()
+        d = indicators(hist)
+        x = d.iloc[-1]
+        score, _, _ = black_score(d)
+        ma20, ma60, ma200 = x.MA20, x.MA60, x.MA200
+        close, rsi, vr, chg = x.Close, x.RSI, x.VOL_RATIO, x.CHANGE
+        h20, h60 = x.HIGH20, x.HIGH60
+        sigs = []
+        if pd.notna(h20) and close >= h20 and pd.notna(vr) and vr >= 1.3 and pd.notna(chg) and chg > 0:
+            sigs.append('🚀 強勢突破')
+        if pd.notna(h60) and close >= h60 and pd.notna(vr) and vr >= 1.1 and pd.notna(chg) and chg > 0:
+            sigs.append('🚀 60日突破')
+        if pd.notna(h20) and close >= h20*.98 and close < h20:
+            sigs.append('👀 接近突破')
+        if pd.notna(ma20) and pd.notna(ma60) and pd.notna(ma200) and close > ma20 > ma60 > ma200 and pd.notna(vr) and vr >= 1.1 and pd.notna(rsi) and 50 <= rsi <= 78:
+            sigs.append('🔥 主升段')
+        if pd.notna(ma20) and pd.notna(ma200) and close >= ma20*.98 and close <= ma20*1.03 and close >= ma200 and pd.notna(rsi) and rsi >= 45:
+            sigs.append('🟢 守護生命線')
+        if pd.notna(vr) and vr >= 2 and pd.notna(chg) and chg >= 3 and ((pd.notna(rsi) and rsi >= 78) or vr >= 3):
+            sigs.append('⚠️ 爆量高危')
+        if pd.notna(vr) and vr >= 2 and pd.notna(chg) and chg > 0 and pd.notna(h20) and close >= h20:
+            sigs.append('⚠️ 爆量突破')
+        if pd.notna(vr) and vr >= 2 and pd.notna(rsi) and rsi >= 78:
+            sigs.append('⚠️ 爆量過熱')
+        if pd.notna(vr) and vr >= 1.5 and pd.notna(chg) and chg <= -3:
+            sigs.append('⚠️ 爆量下跌')
+        weak = ((pd.notna(ma20) and close < ma20) or
+                (pd.notna(ma60) and pd.notna(ma200) and ma60 < ma200) or
+                (pd.notna(chg) and chg <= -3 and pd.notna(vr) and vr >= 1.3))
+        if weak and score < 60:
+            sigs.append('🔴 趨勢轉弱')
+        for sig in sigs:
+            events.append({
+                '日期': d.index[-1], '訊號': sig, '收盤': float(close),
+                '黑嚕嚕分數': int(score), '漲跌%': float(chg) if pd.notna(chg) else np.nan,
+                '量比': float(vr) if pd.notna(vr) else np.nan, 'RSI': float(rsi) if pd.notna(rsi) else np.nan
+            })
+    return pd.DataFrame(events)
+
+def run_backtest(symbol, df, horizon, min_gap, selected_signals, min_score):
+    """訊號日收盤進場，N 個交易日後收盤出場。"""
+    ev = historical_signal_events(df)
+    if ev.empty:
+        return pd.DataFrame()
+    ev = ev[(ev['訊號'].isin(selected_signals)) & (ev['黑嚕嚕分數'] >= min_score)].copy()
+    if ev.empty:
+        return ev
+    close = df['Close'].copy()
+    highs, lows = df['High'], df['Low']
+    rows, last_by_signal = [], {}
+    idx = list(close.index)
+    pos_map = {pd.Timestamp(x): i for i, x in enumerate(idx)}
+    for _, e in ev.sort_values('日期').iterrows():
+        date = pd.Timestamp(e['日期'])
+        entry_i = pos_map.get(date)
+        if entry_i is None or entry_i + horizon >= len(idx):
+            continue
+        sig = e['訊號']
+        prev_i = last_by_signal.get(sig)
+        if prev_i is not None and entry_i - prev_i < min_gap:
+            continue
+        exit_i = entry_i + horizon
+        entry = float(close.iloc[entry_i]); exit_price = float(close.iloc[exit_i])
+        future_close = close.iloc[entry_i+1:exit_i+1]
+        future_high = highs.iloc[entry_i+1:exit_i+1]
+        future_low = lows.iloc[entry_i+1:exit_i+1]
+        ret = (exit_price / entry - 1) * 100
+        mfe = (float(future_high.max()) / entry - 1) * 100 if len(future_high) else 0
+        mae = (float(future_low.min()) / entry - 1) * 100 if len(future_low) else 0
+        rows.append({
+            '股票': str(symbol).zfill(4), '名稱': stock_name(symbol),
+            '訊號': sig, '訊號日期': date, '出場日期': idx[exit_i],
+            '持有天數': horizon, '進場價': entry, '出場價': exit_price,
+            '報酬%': ret, 'MFE%': mfe, 'MAE%': mae,
+            '黑嚕嚕分數': int(e['黑嚕嚕分數']), '量比': e['量比'], 'RSI': e['RSI']
+        })
+        last_by_signal[sig] = entry_i
+    return pd.DataFrame(rows)
+
+def backtest_summary(events):
+    if events is None or events.empty:
+        return pd.DataFrame()
+    g = events.groupby('訊號', dropna=False)
+    out = g['報酬%'].agg(['count','mean','median','sum']).reset_index()
+    wins = g['報酬%'].apply(lambda x: (x > 0).mean() * 100).reset_index(name='勝率%')
+    out = out.merge(wins, on='訊號', how='left')
+    out.columns = ['訊號','樣本數','平均報酬%','中位數報酬%','報酬加總%','勝率%']
+    return out.sort_values(['勝率%','平均報酬%'], ascending=False)
+
+def overall_backtest_stats(events):
+    if events is None or events.empty:
+        return {'樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數報酬%':np.nan,'報酬加總%':np.nan}
+    r = events['報酬%']
+    return {'樣本數':len(r),'勝率%':(r > 0).mean()*100,'平均報酬%':r.mean(),'中位數報酬%':r.median(),'報酬加總%':r.sum()}
+
+
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.0｜雷達大腦版')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.2｜雷達＋訊號回測版')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃'])
 max_n=st.sidebar.slider('最多掃描股票數',10,200,60,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
@@ -149,7 +263,7 @@ for s in raw:
     if s.isdigit() and s.zfill(4) not in symbols:symbols.append(s.zfill(4))
 symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.0｜雷達核心版；目前資料仍為 yfinance 日資料，V4 再接 Fugle 即時行情。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.2｜雷達核心版；目前資料仍為 yfinance 日資料，V4 再接 Fugle 即時行情。')
 a,b,c,d,e=st.columns(5);a.metric('股票池',f'{len(symbols)} 檔');b.metric('最低分數',min_score);c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
 
 rows=[];p=st.progress(0);status=st.empty()
@@ -174,7 +288,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　RSI {r['RSI']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股'])
+t1,t2,t3,t4,t5,t6=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測'])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','RSI','黑嚕嚕分數','等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['RSI']=show['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -200,4 +314,61 @@ with t5:
     else:
         q=result[result['股票'].isin(watch)].sort_values('黑嚕嚕分數',ascending=False)[['股票','名稱','價格','漲跌%','量比','RSI','黑嚕嚕分數','等級','訊號']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['RSI']=q['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.0｜目前使用 yfinance 日資料建立雷達邏輯。V3.x 先完成訊號與雷達功能；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+
+with t6:
+    st.subheader('🧪 V3.2 歷史訊號回測')
+    st.caption('研究型回測：訊號日收盤進場，持有 N 個交易日後以收盤價出場。未納入手續費、交易稅、滑價、漲跌停與流動性。')
+    c1,c2,c3=st.columns(3)
+    with c1:
+        bt_horizon=st.selectbox('持有交易日',[1,3,5,10,20],index=2)
+    with c2:
+        bt_gap=st.selectbox('同訊號冷卻天數',[0,3,5,10,20],index=1)
+    with c3:
+        bt_min_score=st.slider('回測最低黑嚕嚕分數',0,100,50,5)
+    bt_signals=st.multiselect('回測訊號',SIGNAL_LABELS,default=['🚀 強勢突破','🔥 主升段','🟢 守護生命線'])
+    bt_n=st.slider('回測股票數量',1,min(50,len(symbols)),min(20,len(symbols)),1)
+    if st.button('▶ 開始 V3.2 回測',type='primary'):
+        if not bt_signals:
+            st.warning('請至少選擇一個訊號。')
+        else:
+            all_events=[]; bt_progress=st.progress(0); bt_status=st.empty()
+            bt_symbols=symbols[:bt_n]
+            for i,sym in enumerate(bt_symbols):
+                bt_status.text(f'正在回測：{sym} {stock_name(sym)}　({i+1}/{len(bt_symbols)})')
+                bdf=get_stock_data(sym)
+                if bdf is not None:
+                    ev=run_backtest(sym,bdf,bt_horizon,bt_gap,bt_signals,bt_min_score)
+                    if not ev.empty: all_events.append(ev)
+                bt_progress.progress((i+1)/max(len(bt_symbols),1))
+            bt_status.empty(); bt_progress.empty()
+            bt_result=pd.concat(all_events,ignore_index=True) if all_events else pd.DataFrame()
+            st.session_state['v32_bt_result']=bt_result
+            st.session_state['v32_bt_horizon']=bt_horizon
+    bt_result=st.session_state.get('v32_bt_result',pd.DataFrame())
+    if not bt_result.empty:
+        stats=overall_backtest_stats(bt_result)
+        c1,c2,c3,c4,c5=st.columns(5)
+        c1.metric('樣本數',stats['樣本數'])
+        c2.metric('勝率',f"{stats['勝率%']:.1f}%")
+        c3.metric('平均報酬',f"{stats['平均報酬%']:+.2f}%")
+        c4.metric('中位數',f"{stats['中位數報酬%']:+.2f}%")
+        c5.metric('報酬加總',f"{stats['報酬加總%']:+.2f}%")
+        st.markdown('### 📊 各訊號績效')
+        summary=backtest_summary(bt_result)
+        st.dataframe(summary.style.format({
+            '平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%','報酬加總%':'{:+.2f}%','勝率%':'{:.1f}%'
+        }),use_container_width=True,hide_index=True)
+        st.markdown('### 📈 平均報酬')
+        st.bar_chart(summary.set_index('訊號')['平均報酬%'])
+        st.markdown('### 🎯 勝率')
+        st.bar_chart(summary.set_index('訊號')['勝率%'])
+        st.markdown('### 🧾 歷史回測明細')
+        detail=bt_result.copy()
+        for col in ['進場價','出場價','報酬%','MFE%','MAE%','量比','RSI']:
+            if col in detail.columns: detail[col]=detail[col].round(2)
+        st.dataframe(detail,use_container_width=True,hide_index=True)
+        st.download_button('⬇️ 匯出 V3.2 回測 CSV',bt_result.to_csv(index=False).encode('utf-8-sig'),'v3.2_backtest.csv','text/csv')
+    else:
+        st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
+
+st.divider();st.caption('🖤 黑嚕嚕 V3.2｜目前使用 yfinance 日資料建立雷達邏輯。V3.x 先完成訊號與雷達功能；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
