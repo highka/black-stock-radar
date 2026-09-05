@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # 🖤 黑嚕嚕－台股盤中雷達 V3.3
-# V3.3.1：全市場智能掃描（官方行情初篩 → 技術雷達精掃），V4 再接 Fugle 即時行情
+# V3.3.2：智能掃描 2.0（分市場配額＋流動性／動能排序＋技術精掃），V4 再接 Fugle 即時行情
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -153,26 +153,61 @@ def load_market_snapshot():
 
 
 def smart_rank_universe(universe, snapshot, selected_markets, top_n, min_volume, min_value, min_change):
-    """第二層智能排序：流動性＋動能＋當日量價異動，最後只交給技術雷達精掃。"""
+    """V3.3.2 智能初篩：先過流動性門檻，再以分市場配額避免上市市場完全吃掉候選名額。"""
+    base=universe[universe['市場'].isin(selected_markets)].copy()
+    if base.empty:
+        return base, '沒有可掃描的市場股票池。'
     if snapshot is None or snapshot.empty:
-        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '官方行情初篩無資料，退回完整股票池順序。'
+        return base.head(top_n).copy(), '官方行情初篩無資料，退回完整股票池順序。'
     d=snapshot[snapshot['市場'].isin(selected_markets)].copy()
     if d.empty:
-        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '選定市場沒有官方行情資料，退回完整股票池順序。'
+        return base.head(top_n).copy(), '選定市場沒有官方行情資料，退回完整股票池順序。'
     d=d[d['成交量'].fillna(0)>=min_volume]
     d=d[d['成交額'].fillna(0)>=min_value]
     d=d[d['漲跌幅%'].fillna(0)>=min_change]
     if d.empty:
-        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '條件過嚴，已退回完整股票池順序。'
-    d['量能分']=np.log1p(d['成交額'].clip(lower=0))
-    d['量能分']=(d['量能分']-d['量能分'].min())/(d['量能分'].max()-d['量能分'].min()+1e-9)*45
-    d['動能分']=d['漲跌幅%'].clip(-10,10).add(10)/20*30
-    d['波動分']=((d['最高價']-d['最低價'])/d['收盤價'].replace(0,np.nan)).fillna(0).clip(0,0.2)/0.2*10
-    d['活躍分']=(d['成交量']>0).astype(int)*15
-    d['智能初篩分']=(d['量能分']+d['動能分']+d['波動分']+d['活躍分']).round(2)
-    d=d.sort_values(['智能初篩分','成交額','成交量'],ascending=False).head(top_n)
-    out=universe.merge(d[['股票代號','市場','智能初篩分','成交額','成交量','漲跌幅%']],on=['股票代號','市場'],how='inner')
-    return out.sort_values('智能初篩分',ascending=False), f'官方行情初篩後保留 {len(out)} 檔。'
+        return base.head(top_n).copy(), '條件過嚴，已退回完整股票池順序。'
+
+    # V3.3.2：把各市場分開正規化，避免上市股票因總市值／成交額天然較大而壟斷候選池。
+    parts=[]
+    for market,g in d.groupby('市場',sort=False):
+        g=g.copy()
+        turnover=np.log1p(g['成交額'].clip(lower=0))
+        if turnover.max()>turnover.min():
+            g['量能分']=((turnover-turnover.min())/(turnover.max()-turnover.min())*45)
+        else:
+            g['量能分']=22.5
+        g['動能分']=(g['漲跌幅%'].clip(-10,10).add(10)/20*30)
+        g['波動分']=((g['最高價']-g['最低價'])/g['收盤價'].replace(0,np.nan)).fillna(0).clip(0,0.2)/0.2*10
+        g['活躍分']=(g['成交量']>0).astype(int)*15
+        g['智能初篩分']=(g['量能分']+g['動能分']+g['波動分']+g['活躍分']).round(2)
+        parts.append(g.sort_values(['智能初篩分','成交額','成交量'],ascending=False))
+    d=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+    if d.empty:
+        return base.head(top_n).copy(), '智能初篩無結果，退回完整股票池順序。'
+
+    # 每個市場至少分到一小部分名額；剩餘名額再依智能初篩分補足。
+    markets=[m for m in selected_markets if m in set(d['市場'])]
+    quotas={m:max(1,int(round(top_n*len(d[d['市場']==m])/max(len(d),1)))) for m in markets}
+    while sum(quotas.values())>top_n:
+        candidates=[m for m in markets if quotas[m]>1]
+        if not candidates: break
+        m=min(candidates,key=lambda x:quotas[x]);quotas[m]-=1
+    while sum(quotas.values())<min(top_n,len(d)):
+        candidates=[m for m in markets if quotas[m]<len(d[d['市場']==m])]
+        if not candidates: break
+        m=max(candidates,key=lambda x:float(d.loc[d['市場']==x,'智能初篩分'].max()));quotas[m]+=1
+    picked=[]
+    for m in markets:
+        picked.append(d[d['市場']==m].head(quotas.get(m,0)))
+    picked=pd.concat(picked,ignore_index=True) if picked else d.head(top_n)
+    if len(picked)<top_n:
+        remain=d[~d['股票代號'].isin(picked['股票代號'])].sort_values(['智能初篩分','成交額'],ascending=False)
+        picked=pd.concat([picked,remain.head(top_n-len(picked))],ignore_index=True)
+    picked=picked.sort_values(['智能初篩分','成交額'],ascending=False).head(top_n)
+    out=base.merge(picked[['股票代號','市場','智能初篩分','成交額','成交量','漲跌幅%']],on=['股票代號','市場'],how='inner')
+    counts='、'.join([f"{m} {len(out[out['市場']==m])}檔" for m in markets])
+    return out.sort_values('智能初篩分',ascending=False), f'官方行情初篩後保留 {len(out)} 檔（{counts}）。'
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -413,8 +448,16 @@ if scan_mode.startswith('🧠'):
 else:
     symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.1｜全市場智能掃描：官方行情初篩 → 黑嚕嚕技術精掃；行情仍為 yfinance 日資料。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2｜智能掃描 2.0：官方行情初篩 → 分市場候選 → 黑嚕嚕技術精掃；行情仍為 yfinance 日資料。')
 a,b,c,d,e=st.columns(5);a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔');c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
+if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' in smart_pool.columns:
+    with st.expander('🔎 查看 V3.3.2 智能候選池',expanded=False):
+        preview=smart_pool[['股票代號','股票名稱','市場','智能初篩分','漲跌幅%','成交量','成交額']].copy()
+        preview=preview.rename(columns={'股票代號':'股票','股票名稱':'名稱','漲跌幅%':'漲跌幅'})
+        preview['漲跌幅']=preview['漲跌幅'].map(lambda x:f'{x:+.2f}%' if pd.notna(x) else '-')
+        preview['成交量']=preview['成交量'].map(lambda x:f'{x:,.0f}')
+        preview['成交額']=preview['成交額'].map(lambda x:f'{x:,.0f}')
+        st.dataframe(preview,use_container_width=True,hide_index=True)
 if scan_mode.startswith('🧠'):
     st.info(f'🧠 智能掃描：先從上市／上櫃／興櫃官方行情篩選，再對 {len(symbols)} 檔進行 2 年技術分析。{smart_note}')
     if smart_status: st.caption('｜'.join(smart_status))
@@ -524,4 +567,4 @@ with t6:
     else:
         st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.1｜全市場智能掃描：官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2｜智能掃描 2.0：分市場配額＋官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
