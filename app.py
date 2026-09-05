@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # 🖤 黑嚕嚕－台股盤中雷達 V3.3
-# V3.3：全市場股票池自動同步（上市／上櫃／興櫃），V4 再接 Fugle 即時行情
+# V3.3.1：全市場智能掃描（官方行情初篩 → 技術雷達精掃），V4 再接 Fugle 即時行情
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -99,6 +99,81 @@ def stock_market(s):
         x=UNIVERSE[UNIVERSE['股票代號']==str(s).zfill(4)]
         if not x.empty:return str(x.iloc[0]['市場']).strip()
     return '未分類'
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_market_snapshot():
+    """取得官方當日行情，先做全市場第一層篩選，避免逐檔下載 2 年 yfinance。"""
+    sources = [
+        ('上市', 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'),
+        ('上櫃', 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes'),
+        ('興櫃', 'https://www.tpex.org.tw/openapi/v1/tpex_esb_latest_statistics'),
+    ]
+    all_rows=[]; status=[]
+    def pick(item, keys):
+        for k in keys:
+            if k in item and item[k] not in (None,''):
+                return item[k]
+        return ''
+    def num(v):
+        try:
+            return float(str(v).replace(',','').replace('%','').strip())
+        except Exception:
+            return np.nan
+    for market,url in sources:
+        try:
+            r=requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'})
+            r.raise_for_status(); data=r.json()
+            if isinstance(data,dict): data=data.get('data',data.get('results',data.get('aaData',[])))
+            if not isinstance(data,list): raise ValueError('API 回傳格式不是清單')
+            count=0
+            for item in data:
+                if not isinstance(item,dict): continue
+                code=str(pick(item,['Code','SecuritiesCompanyCode','公司代號','股票代號','證券代號'])).strip().upper()
+                name=str(pick(item,['Name','CompanyAbbreviation','公司簡稱','股票名稱','證券名稱'])).strip()
+                close=num(pick(item,['ClosingPrice','Close','收盤價','成交價','最後成交價','成交價格']))
+                change=num(pick(item,['Change','change','漲跌','漲跌價差','漲跌幅']))
+                volume=num(pick(item,['TradeVolume','Volume','成交股數','成交量']))
+                value=num(pick(item,['TradeValue','成交金額','成交值']))
+                high=num(pick(item,['HighestPrice','High','最高價']))
+                low=num(pick(item,['LowestPrice','Low','最低價']))
+                if not re.fullmatch(r'[0-9A-Z]{4,6}',code) or not np.isfinite(close) or close<=0:
+                    continue
+                all_rows.append({'股票代號':code,'股票名稱':name,'市場':market,'收盤價':close,'漲跌':change,'成交量':volume,'成交額':value,'最高價':high,'最低價':low})
+                count+=1
+            status.append(f'{market}：{count} 檔')
+        except Exception as e:
+            status.append(f'{market}：失敗（{type(e).__name__}）')
+    d=pd.DataFrame(all_rows)
+    if d.empty:
+        return pd.DataFrame(columns=['股票代號','股票名稱','市場','收盤價','漲跌','成交量','成交額','最高價','最低價']), status
+    d=d.drop_duplicates(['股票代號','市場'])
+    d['成交額']=d['成交額'].fillna(0); d['成交量']=d['成交量'].fillna(0)
+    d['漲跌幅%']=np.where(d['收盤價']>0,d['漲跌']/d['收盤價']*100,np.nan)
+    return d,status
+
+
+def smart_rank_universe(universe, snapshot, selected_markets, top_n, min_volume, min_value, min_change):
+    """第二層智能排序：流動性＋動能＋當日量價異動，最後只交給技術雷達精掃。"""
+    if snapshot is None or snapshot.empty:
+        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '官方行情初篩無資料，退回完整股票池順序。'
+    d=snapshot[snapshot['市場'].isin(selected_markets)].copy()
+    if d.empty:
+        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '選定市場沒有官方行情資料，退回完整股票池順序。'
+    d=d[d['成交量'].fillna(0)>=min_volume]
+    d=d[d['成交額'].fillna(0)>=min_value]
+    d=d[d['漲跌幅%'].fillna(0)>=min_change]
+    if d.empty:
+        return universe[universe['市場'].isin(selected_markets)].head(top_n).copy(), '條件過嚴，已退回完整股票池順序。'
+    d['量能分']=np.log1p(d['成交額'].clip(lower=0))
+    d['量能分']=(d['量能分']-d['量能分'].min())/(d['量能分'].max()-d['量能分'].min()+1e-9)*45
+    d['動能分']=d['漲跌幅%'].clip(-10,10).add(10)/20*30
+    d['波動分']=((d['最高價']-d['最低價'])/d['收盤價'].replace(0,np.nan)).fillna(0).clip(0,0.2)/0.2*10
+    d['活躍分']=(d['成交量']>0).astype(int)*15
+    d['智能初篩分']=(d['量能分']+d['動能分']+d['波動分']+d['活躍分']).round(2)
+    d=d.sort_values(['智能初篩分','成交額','成交量'],ascending=False).head(top_n)
+    out=universe.merge(d[['股票代號','市場','智能初篩分','成交額','成交量','漲跌幅%']],on=['股票代號','市場'],how='inner')
+    return out.sort_values('智能初篩分',ascending=False), f'官方行情初篩後保留 {len(out)} 檔。'
+
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_stock_data(symbol, market=None):
@@ -308,8 +383,12 @@ if st.sidebar.button('🔄 更新全市場股票池'):
     st.rerun()
 counts=UNIVERSE['市場'].value_counts().to_dict() if not UNIVERSE.empty else {}
 st.sidebar.caption(f"官方股票池：上市 {counts.get('上市',0)}｜上櫃 {counts.get('上櫃',0)}｜興櫃 {counts.get('興櫃',0)}")
-max_n=st.sidebar.slider('最多掃描股票數',10,500,150,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
+scan_mode=st.sidebar.radio('掃描方式',['🧠 全市場智能掃描','🎯 指定股票池'],index=0)
+max_n=st.sidebar.slider('技術精掃檔數',20,500,200,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
 change_range=st.sidebar.slider('漲跌幅範圍 (%)',-10.0,10.0,(-10.0,10.0),0.5);rsi_range=st.sidebar.slider('RSI 範圍',0,100,(0,100),1)
+smart_min_volume=st.sidebar.number_input('智能初篩最低成交量（股）',min_value=0,step=1000,value=100000)
+smart_min_value=st.sidebar.number_input('智能初篩最低成交額（元）',min_value=0,step=1000000,value=10000000)
+smart_min_change=st.sidebar.slider('智能初篩最低漲幅 (%)',-10.0,10.0,0.0,0.5)
 sort_mode=st.sidebar.selectbox('排行榜排序',['黑嚕嚕分數','漲跌幅','量比','RSI','價格']);auto=st.sidebar.checkbox('自動刷新',value=False);refresh=st.sidebar.select_slider('刷新秒數',options=[30,60,120,180,300],value=120)
 universe_codes=UNIVERSE['股票代號'].tolist() if not UNIVERSE.empty else DEFAULT_STOCKS.split(',')
 stock_text=st.sidebar.text_area('股票池（官方全市場自動同步，可自行縮小）',','.join(universe_codes),height=180)
@@ -324,10 +403,21 @@ market_map=dict(zip(UNIVERSE['股票代號'],UNIVERSE['市場'])) if not UNIVERS
 if not STOCK_LIST.empty and '股票代號' in STOCK_LIST.columns and '市場' in STOCK_LIST.columns:
     market_map.update(dict(zip(STOCK_LIST['股票代號'].astype(str).str.zfill(4),STOCK_LIST['市場'])))
 symbols=[x for x in symbols if not markets or market_map.get(x,'未分類') in markets]
-symbols=symbols[:max_n]
+smart_snapshot=pd.DataFrame();smart_status=[];smart_note=''
+if scan_mode.startswith('🧠'):
+    smart_snapshot,smart_status=load_market_snapshot()
+    base_universe=UNIVERSE[UNIVERSE['市場'].isin(markets)].copy() if not UNIVERSE.empty else pd.DataFrame()
+    smart_pool,smart_note=smart_rank_universe(base_universe,smart_snapshot,markets,max_n,smart_min_volume,smart_min_value,smart_min_change)
+    symbols=smart_pool['股票代號'].astype(str).str.zfill(4).tolist()
+    market_map.update(dict(zip(smart_pool['股票代號'],smart_pool['市場'])))
+else:
+    symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3｜股票池自動同步 TWSE／TPEx 上市、上櫃、興櫃；行情仍為 yfinance 日資料。')
-a,b,c,d,e=st.columns(5);a.metric('股票池',f'{len(symbols)} 檔');b.metric('最低分數',min_score);c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.1｜全市場智能掃描：官方行情初篩 → 黑嚕嚕技術精掃；行情仍為 yfinance 日資料。')
+a,b,c,d,e=st.columns(5);a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔');c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
+if scan_mode.startswith('🧠'):
+    st.info(f'🧠 智能掃描：先從上市／上櫃／興櫃官方行情篩選，再對 {len(symbols)} 檔進行 2 年技術分析。{smart_note}')
+    if smart_status: st.caption('｜'.join(smart_status))
 
 rows=[];p=st.progress(0);status=st.empty()
 for i,s in enumerate(symbols):
@@ -434,4 +524,4 @@ with t6:
     else:
         st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3｜股票池自動同步上市／上櫃／興櫃；技術資料使用 yfinance 日資料。V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.1｜全市場智能掃描：官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
