@@ -554,7 +554,7 @@ def historical_composite_events(df, weights=None):
         hist=full.iloc[:i+1]
         x=hist.iloc[-1]; parts=historical_component_parts(hist)
         score=round(sum(parts[k] for k in weights),2)
-        tech_score,bd=black_score(hist)
+        tech_score,bd,_=black_score(hist)
         sig='、'.join(signals(hist,tech_score))
         events.append({'日期':hist.index[-1],'綜合分數':score,'黑嚕嚕技術分數':tech_score,
                        **parts,'收盤':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0,
