@@ -8,7 +8,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2
+# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2/A2.1
 # V3.3.2：智能掃描 2.0（分市場配額＋流動性／動能排序＋技術精掃），V4 再接 Fugle 即時行情
 # ============================================================
 
@@ -411,33 +411,130 @@ def overall_backtest_stats(events):
 
 
 # ============================================================
-# 🖤 A2：綜合選股分數回測
+# 🖤 A2：綜合選股分數回測（修正版）
 # ============================================================
-COMPOSITE_WEIGHTS={'智能流動性':15,'智能動能':10,'智能波動':5,'智能活躍':5,'MA多頭結構':15,'生命線':10,'RSI動能':10,'量價確認':10,'突破':10,'策略品質':5}
+COMPOSITE_WEIGHTS={'智能流動性':15,'智能動能':10,'智能波動':5,'智能活躍':5,
+                   'MA多頭結構':15,'生命線':10,'RSI動能':10,'量價確認':10,
+                   '突破':10,'策略品質':10}
+
+A2_COMPONENT_DESC={
+    '智能流動性':'成交額相對排名（歷史 OHLCV 代理）',
+    '智能動能':'當日漲跌＋近5日動能（歷史 OHLCV 代理）',
+    '智能波動':'當日振幅與近期波動（歷史 OHLCV 代理）',
+    '智能活躍':'成交量相對20日均量（歷史 OHLCV 代理）',
+    'MA多頭結構':'MA20 / MA60 / MA200 趨勢結構',
+    '生命線':'股價相對 MA200 的位置',
+    'RSI動能':'RSI 強弱位置',
+    '量價確認':'量比＋價格方向同步性',
+    '突破':'突破前20日高點的程度',
+    '策略品質':'歷史訊號條件品質（權重修正為10分，使總分完整100分）'
+}
+
+def _clip_score(x, lo=0, hi=100):
+    try:return float(np.clip(float(x),lo,hi))
+    except Exception:return 0.0
+
+def historical_component_parts(hist):
+    """只使用截至當日資料計算 A2；不偷看未來。
+    四個「智能」項目是官方盤中智能初篩的 OHLCV 歷史代理，不宣稱等同歷史官方快照。
+    """
+    x=hist.iloc[-1]
+    close=float(x.Close); vol=float(x.Volume) if pd.notna(x.Volume) else 0.0
+    ma20=float(x.MA20) if pd.notna(x.MA20) else np.nan
+    ma60=float(x.MA60) if pd.notna(x.MA60) else np.nan
+    ma200=float(x.MA200) if pd.notna(x.MA200) else np.nan
+    rsi=float(x.RSI) if pd.notna(x.RSI) else 50.0
+    vr=float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 1.0
+    chg=float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0
+
+    # --- 1) 歷史智能代理：每個項目獨立正規化到其權重 ---
+    turnover=close*vol
+    turn20=hist['Close'].mul(hist['Volume']).rolling(20).median().iloc[-1]
+    liq=15*_clip_score((turnover/(turn20 if pd.notna(turn20) and turn20>0 else turnover))-0.5,0,2)/2
+
+    ret5=(close/float(hist['Close'].iloc[-6])-1)*100 if len(hist)>=6 and float(hist['Close'].iloc[-6])>0 else 0
+    mom=10*(_clip_score(chg,-5,5)+5)/10*0.55 + 10*(_clip_score(ret5,-10,10)+10)/20*0.45
+
+    amp=((float(x.High)-float(x.Low))/close*100) if close>0 and pd.notna(x.High) and pd.notna(x.Low) else 0
+    amp20=hist['Close'].pct_change().rolling(20).std().iloc[-1]*100
+    vol_score=5*(_clip_score(amp,0,10)/10*0.65 + _clip_score(amp20 if pd.notna(amp20) else 0,0,8)/8*0.35)
+
+    act=5*(_clip_score(vr,0,3)/3)
+
+    # --- 2) 技術項目 ---
+    ma=0
+    if pd.notna(ma20) and close>ma20: ma+=6
+    if pd.notna(ma60) and pd.notna(ma20) and ma20>ma60: ma+=4
+    if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: ma+=3
+    if pd.notna(ma20) and pd.notna(hist['MA20_SLOPE'].iloc[-1]) and hist['MA20_SLOPE'].iloc[-1]>0: ma+=2
+    ma=min(ma,15)
+
+    life=0
+    if pd.notna(ma200):
+        dist=(close/ma200-1)*100
+        if dist>=0 and dist<=5: life=10
+        elif dist>5: life=8
+        elif dist>=-3: life=6
+        elif dist>=-8: life=3
+        else: life=0
+
+    rsi_score=10*(_clip_score(rsi,30,70)-30)/40
+    if rsi>=50:rsi_score=min(10,rsi_score+1.0)
+    if rsi>=70:rsi_score=7.5
+
+    q=0
+    if vr>=1.2 and chg>0:q=10
+    elif vr>=1.0 and chg>0:q=8
+    elif vr>=1.2:q=6
+    elif chg>0:q=5
+    elif vr<0.7:q=2
+    else:q=3
+
+    prev20=hist['HIGH20'].iloc[-1] if 'HIGH20' in hist.columns else np.nan
+    if pd.notna(prev20) and prev20>0:
+        # HIGH20 是含當日 rolling high，因此改用前一日20日高避免同日自我比較
+        prior_high=hist['High'].shift(1).rolling(20).max().iloc[-1]
+    else: prior_high=np.nan
+    if pd.notna(prior_high) and prior_high>0:
+        ratio=close/prior_high-1
+        br=10 if ratio>=0 else 7 if ratio>=-0.01 else 4 if ratio>=-0.03 else 1
+        if close>=prior_high: br=10
+    else: br=0
+
+    # 策略品質：依歷史訊號強度給 0~5 分，不使用未來報酬。
+    tech_score=(ma/15*30 + life/10*20 + rsi_score/10*20 + q/10*15 + br/10*15)
+    sig=signals(hist,tech_score)
+    strategy=min(5, 1.0*len(sig))
+    if any('🚀 強勢突破' in s for s in sig): strategy=5
+    elif any('🔥 主升段' in s for s in sig): strategy=max(strategy,4)
+    elif any('🟢 守護生命線' in s for s in sig): strategy=max(strategy,3)
+
+    parts={'智能流動性':liq,'智能動能':mom,'智能波動':vol_score,'智能活躍':act,
+           'MA多頭結構':ma,'生命線':life,'RSI動能':rsi_score,'量價確認':q,
+           '突破':br,'策略品質':strategy}
+    return {k:round(_clip_score(v,0,COMPOSITE_WEIGHTS[k]),2) for k,v in parts.items()}
 
 def composite_score_from_row(r):
-    trend=min(float(r.get('趨勢分',0)),30)/30*15
-    momentum=min(float(r.get('動能分',0)),20)/20*10
-    volume=min(float(r.get('量能分',0)),20)/20*10
-    breakout=min(float(r.get('突破分',0)),15)/15*10
-    rsi=min(float(r.get('RSI分',0)),10)/10*10
-    ma200=r.get('MA200',np.nan); close=r.get('價格',np.nan); life=0
-    if pd.notna(ma200) and pd.notna(close):
-        dist=close/ma200-1
-        if close>=ma200 and dist<=.05: life=10
-        elif close>ma200: life=max(5,10-min(dist*100,5))
-        elif dist>=-.03: life=5
-        elif dist>=-.08: life=2
-    smart=r.get('智能初篩分',np.nan)
+    """將即時排行榜 row 轉成 A2 綜合分數；即時頁仍沿用 V3.3.2 原始資料。"""
+    parts={k:0.0 for k in COMPOSITE_WEIGHTS}
+    parts['MA多頭結構']=min(float(r.get('趨勢分',0))/30*15,15)
+    close=r.get('價格',np.nan); ma200=r.get('MA200',np.nan)
+    if pd.notna(close) and pd.notna(ma200):
+        dist=float(close/ma200-1)
+        parts['生命線']=10 if 0<=dist<=.05 else 8 if dist>.05 else 6 if dist>=-.03 else 3 if dist>=-.08 else 0
+    parts['RSI動能']=_clip_score((float(r.get('RSI',50))-30)/40*10,0,10)
+    parts['量價確認']=10 if float(r.get('量比',0))>=1.2 and float(r.get('漲跌%',0))>0 else 8 if float(r.get('量比',0))>=1 and float(r.get('漲跌%',0))>0 else 5 if float(r.get('漲跌%',0))>0 else 3
+    parts['突破']=min(float(r.get('突破分',0))/15*10,10)
+    smart=float(r.get('智能初篩分',np.nan)) if pd.notna(r.get('智能初篩分',np.nan)) else np.nan
     if pd.notna(smart):
-        smart_liq=min(max(float(smart)/100*15,0),15)
-        smart_mom=min(max((float(r.get('漲跌%',0))+10)/20*10,0),10)
-        smart_vol=min(max(float(r.get('當日振幅%',0))/20*5,0),5)
-        smart_act=5 if float(r.get('成交量',0))>0 else 0
-    else: smart_liq=smart_mom=smart_vol=smart_act=0
-    sig=str(r.get('訊號','')); strategy=min(5,max(0,sig.count('、')+1)) if sig else 0
-    parts={'智能流動性':smart_liq,'智能動能':smart_mom,'智能波動':smart_vol,'智能活躍':smart_act,'MA多頭結構':trend,'生命線':life,'RSI動能':rsi,'量價確認':volume,'突破':breakout,'策略品質':strategy}
-    return round(min(100,max(0,sum(parts.values()))),2),parts
+        parts['智能流動性']=_clip_score(smart/100*15,0,15)
+        parts['智能動能']=_clip_score((float(r.get('漲跌%',0))+10)/20*10,0,10)
+        parts['智能波動']=_clip_score(float(r.get('當日振幅%',0))/20*5,0,5)
+        parts['智能活躍']=5 if float(r.get('成交量',0))>0 else 0
+    sig=str(r.get('訊號',''))
+    parts['策略品質']=5 if '🚀 強勢突破' in sig else 4 if '🔥 主升段' in sig else 3 if '🟢 守護生命線' in sig else min(2,1+sig.count('、')) if sig else 0
+    total=round(sum(parts.values()),2)
+    return min(100,total),parts
 
 def add_composite_columns(result):
     if result.empty:return result
@@ -447,34 +544,134 @@ def add_composite_columns(result):
     result['綜合等級']=result['綜合分數'].map(lambda s:'S' if s>=90 else 'A' if s>=80 else 'B' if s>=70 else 'C' if s>=60 else 'D')
     return result
 
-def historical_composite_events(df):
+def historical_composite_events(df, weights=None):
     if df is None or len(df)<210:return pd.DataFrame()
+    weights=weights or COMPOSITE_WEIGHTS
     events=[]
-    for i in range(200,len(df)):
-        hist=indicators(df.iloc[:i+1].copy()); x=hist.iloc[-1]; score,bd,_=black_score(hist)
-        row={'價格':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0,'成交量':float(x.Volume),'量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0,'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,'MA20':x.MA20,'MA60':x.MA60,'MA200':x.MA200,'趨勢分':bd['趨勢'],'動能分':bd['動能'],'量能分':bd['成交量'],'突破分':bd['突破'],'RSI分':bd['RSI'],'訊號':'、'.join(signals(hist,score)),'智能初篩分':np.nan,'當日振幅%':float((x.High-x.Low)/x.Close*100) if x.Close else 0}
-        comp,parts=composite_score_from_row(row)
-        events.append({'日期':hist.index[-1],'綜合分數':comp,'黑嚕嚕技術分數':score,**{k:round(v,2) for k,v in parts.items()},'收盤':float(x.Close),'漲跌%':row['漲跌%'],'量比':row['量比'],'RSI':row['RSI']})
+    # 指標一次計算，避免 A2.1 對多檔股票時重複計算 1,000+ 次 rolling。
+    full=indicators(df.copy())
+    for i in range(200,len(full)):
+        hist=full.iloc[:i+1]
+        x=hist.iloc[-1]; parts=historical_component_parts(hist)
+        score=round(sum(parts[k] for k in weights),2)
+        tech_score,bd=black_score(hist)
+        sig='、'.join(signals(hist,tech_score))
+        events.append({'日期':hist.index[-1],'綜合分數':score,'黑嚕嚕技術分數':tech_score,
+                       **parts,'收盤':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0,
+                       '量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0,
+                       'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,'訊號':sig})
     return pd.DataFrame(events)
 
-def run_composite_backtest(symbol,df,horizon,min_gap,min_score):
-    ev=historical_composite_events(df)
+def run_composite_backtest(symbol,df,horizon,min_gap,min_score,weights=None):
+    ev=historical_composite_events(df,weights)
     if ev.empty:return pd.DataFrame()
-    ev=ev[ev['綜合分數']>=min_score]; close=df['Close']; highs=df['High']; lows=df['Low']; idx=list(close.index); pos={pd.Timestamp(x):i for i,x in enumerate(idx)}; rows=[]; last=None
-    for _,e in ev.sort_values('日期').iterrows():
+    ev=ev[ev['綜合分數']>=min_score].sort_values('日期')
+    close=pd.to_numeric(df['Close'],errors='coerce'); highs=pd.to_numeric(df['High'],errors='coerce'); lows=pd.to_numeric(df['Low'],errors='coerce')
+    idx=list(close.index); pos={pd.Timestamp(x):i for i,x in enumerate(idx)}; rows=[]; last=-10**9
+    for _,e in ev.iterrows():
         i=pos.get(pd.Timestamp(e['日期']))
-        if i is None or i+horizon>=len(idx) or (last is not None and i-last<min_gap):continue
-        entry=float(close.iloc[i]); ex=float(close.iloc[i+horizon]); fh=highs.iloc[i+1:i+horizon+1]; fl=lows.iloc[i+1:i+horizon+1]
-        rows.append({'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'訊號日期':pd.Timestamp(e['日期']),'出場日期':idx[i+horizon],'持有天數':horizon,'進場價':entry,'出場價':ex,'報酬%':(ex/entry-1)*100,'MFE%':(float(fh.max())/entry-1)*100 if len(fh) else 0,'MAE%':(float(fl.min())/entry-1)*100 if len(fl) else 0,'綜合分數':e['綜合分數'],'黑嚕嚕技術分數':e['黑嚕嚕技術分數']}); last=i
+        if i is None or i+horizon>=len(idx) or i-last<min_gap:continue
+        entry=float(close.iloc[i]); exit_price=float(close.iloc[i+horizon])
+        fh=highs.iloc[i+1:i+horizon+1]; fl=lows.iloc[i+1:i+horizon+1]
+        rows.append({'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'訊號日期':pd.Timestamp(e['日期']),'出場日期':idx[i+horizon],
+                     '持有天數':horizon,'進場價':entry,'出場價':exit_price,'報酬%':(exit_price/entry-1)*100,
+                     'MFE%':(float(fh.max())/entry-1)*100 if len(fh) else 0,
+                     'MAE%':(float(fl.min())/entry-1)*100 if len(fl) else 0,
+                     '綜合分數':e['綜合分數'],'黑嚕嚕技術分數':e['黑嚕嚕技術分數']})
+        last=i
     return pd.DataFrame(rows)
 
 def summarize_score_buckets(bt):
-    if bt.empty:return pd.DataFrame()
-    def b(s):return '90–100' if s>=90 else '80–89' if s>=80 else '70–79' if s>=70 else '60–69' if s>=60 else '0–59'
-    x=bt.copy();x['分數區間']=x['綜合分數'].map(b);g=x.groupby('分數區間')['報酬%'];o=g.agg(['count','mean','median','sum']).reset_index();o['勝率%']=x.groupby('分數區間')['報酬%'].apply(lambda z:(z>0).mean()*100).values;return o.set_index('分數區間').reindex(['90–100','80–89','70–79','60–69','0–59']).reset_index()
+    if bt is None or bt.empty:return pd.DataFrame()
+    def bucket(s):return '90–100' if s>=90 else '80–89' if s>=80 else '70–79' if s>=70 else '60–69' if s>=60 else '0–59'
+    x=bt.copy();x['分數區間']=x['綜合分數'].map(bucket)
+    g=x.groupby('分數區間')['報酬%']
+    out=g.agg(['count','mean','median','sum']).reset_index()
+    win=x.groupby('分數區間')['報酬%'].apply(lambda z:(z>0).mean()*100).reset_index(name='勝率%')
+    out=out.merge(win,on='分數區間',how='left')
+    return out.set_index('分數區間').reindex(['90–100','80–89','70–79','60–69','0–59']).reset_index()
+
+def add_forward_returns(history, horizon):
+    h=history.copy().sort_values(['股票','日期']).reset_index(drop=True)
+    h['未來報酬%']=np.nan
+    for sym,g in h.groupby('股票',sort=False):
+        ix=g.index
+        h.loc[ix,'未來報酬%']=g['收盤'].shift(-horizon).div(g['收盤']).sub(1).mul(100).values
+    return h
+
+def collect_a2_history(symbols, market_map, progress=None):
+    all_hist=[]
+    n=max(len(symbols),1)
+    for i,sym in enumerate(symbols):
+        df=get_stock_data(sym,market_map.get(sym))
+        if df is not None:
+            ev=historical_composite_events(df)
+            if not ev.empty:
+                ev['股票']=str(sym).zfill(4); all_hist.append(ev)
+        if progress is not None:progress((i+1)/n)
+    return pd.concat(all_hist,ignore_index=True) if all_hist else pd.DataFrame()
+
+def _weight_variants(base):
+    """有限、可解釋的 A2.1 候選權重；每組總和固定100。"""
+    keys=list(base); variants=[dict(base)]
+    for src in keys:
+        for dst in keys:
+            if src==dst or base[src]<10:continue
+            w=dict(base);w[src]-=5;w[dst]+=5
+            if min(w.values())>=0 and sum(w.values())==100:variants.append(w)
+    # 再加入少量雙移轉組合，避免候選爆炸
+    for a in keys:
+        for b in keys:
+            if a>=b or base[a]<10:continue
+            for c in keys:
+                if c in (a,b):continue
+                w=dict(base);w[a]-=5;w[b]-=5;w[c]+=10
+                if min(w.values())>=0 and sum(w.values())==100:variants.append(w)
+    uniq=[];seen=set()
+    for w in variants:
+        key=tuple(w[k] for k in keys)
+        if key not in seen:seen.add(key);uniq.append(w)
+    return uniq
+
+def a21_optimize_weight_sets(history, horizon=5, min_score=70, min_gap=3, top_k=10):
+    """70/30 時序切分：只用 validation 表現排名候選權重，不碰 validation 之前的未來資料。"""
+    if history is None or history.empty:return pd.DataFrame(), pd.DataFrame()
+    h=add_forward_returns(history,horizon).dropna(subset=['未來報酬%']).copy()
+    if h.empty:return pd.DataFrame(), pd.DataFrame()
+    # 依股票各自做 chronological 70/30 split
+    train_parts=[];valid_parts=[]
+    for _,g in h.groupby('股票',sort=False):
+        g=g.sort_values('日期'); cut=max(1,int(len(g)*0.7)); train_parts.append(g.iloc[:cut]);valid_parts.append(g.iloc[cut:])
+    train=pd.concat(train_parts,ignore_index=True) if train_parts else pd.DataFrame()
+    valid=pd.concat(valid_parts,ignore_index=True) if valid_parts else pd.DataFrame()
+    if valid.empty:return pd.DataFrame(),pd.DataFrame()
+    keys=list(COMPOSITE_WEIGHTS)
+    results=[]
+    for no,w in enumerate(_weight_variants(COMPOSITE_WEIGHTS),1):
+        def score_frame(x):
+            # 歷史 component 本身已是「原始滿分」；最佳化時先標準化到0~1，再套候選權重。
+            base_max=pd.Series({k:COMPOSITE_WEIGHTS[k] for k in keys})
+            normalized=x[keys].div(base_max,axis='columns').clip(lower=0,upper=1)
+            return normalized.mul(pd.Series(w),axis='columns').sum(axis=1)
+        v=valid.copy();v['_score']=score_frame(v)
+        v=v[v['_score']>=min_score].sort_values(['股票','日期'])
+        chosen=[]
+        for sym,g in v.groupby('股票',sort=False):
+            last_date=None
+            for _,row in g.iterrows():
+                if last_date is not None and (pd.Timestamp(row['日期'])-pd.Timestamp(last_date)).days<min_gap:continue
+                chosen.append(row);last_date=row['日期']
+        sel=pd.DataFrame(chosen)
+        if sel.empty:
+            results.append({'候選編號':no,'樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數報酬%':np.nan,'評分':-999,**{k:w[k] for k in keys}});continue
+        r=sel['未來報酬%'];sample_factor=min(len(r)/30,1.0)
+        objective=(r.mean()*0.55+r.median()*0.20+((r>0).mean()*100)*0.25/10)*sample_factor
+        results.append({'候選編號':no,'樣本數':len(r),'勝率%':(r>0).mean()*100,'平均報酬%':r.mean(),'中位數報酬%':r.median(),'評分':objective,**{k:w[k] for k in keys}})
+    ranking=pd.DataFrame(results).sort_values(['評分','樣本數'],ascending=False).reset_index(drop=True)
+    return ranking.head(top_k),ranking
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3｜全市場股票池＋V3.2 回測')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋V3.2＋A2＋A2.1')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新全市場股票池'):
@@ -633,25 +830,66 @@ with t6:
 
 with t7:
     st.subheader('🖤 A2 綜合選股分數回測')
-    st.caption('比較不同綜合分數門檻在 1／3／5／10／20 個交易日的歷史表現；訊號日收盤進場，N個交易日後收盤出場。')
+    st.caption('A2 修正版：歷史每日只用當天以前的 OHLCV 計分；訊號日收盤進場，N 個交易日後收盤出場。四個「智能」項目為歷史 OHLCV 代理，無法等同歷史官方盤中快照。')
     c1,c2,c3=st.columns(3)
     with c1:a2_h=st.selectbox('A2 持有交易日',[1,3,5,10,20],index=2,key='a2_h')
     with c2:a2_gap=st.selectbox('A2 冷卻天數',[0,3,5,10,20],index=1,key='a2_gap')
     with c3:a2_min=st.slider('A2 最低綜合分數',0,100,70,5,key='a2_min')
-    a2_n=st.slider('A2 回測股票數',1,min(50,len(symbols)),min(20,len(symbols)),1,key='a2_n')
-    if st.button('▶ 開始 A2 綜合分數回測',type='primary'):
+    a2_n=st.slider('A2 回測股票數',1,min(100,len(symbols)),min(30,len(symbols)),1,key='a2_n')
+    st.markdown('#### 📐 A2 固定權重')
+    wt_df=pd.DataFrame({'項目':list(COMPOSITE_WEIGHTS),'權重':[COMPOSITE_WEIGHTS[k] for k in COMPOSITE_WEIGHTS],'說明':[A2_COMPONENT_DESC[k] for k in COMPOSITE_WEIGHTS]})
+    st.dataframe(wt_df,use_container_width=True,hide_index=True)
+    if st.button('▶ 開始 A2 綜合分數回測',type='primary',key='run_a2'):
         all_a2=[];pr=st.progress(0);ss=st.empty()
         for i,sym in enumerate(symbols[:a2_n]):
-            ss.text(f'正在 A2 回測：{sym} {stock_name(sym)} ({i+1}/{a2_n})');bdf=get_stock_data(sym,market_map.get(sym))
+            ss.text(f'正在 A2 回測：{sym} {stock_name(sym)} ({i+1}/{a2_n})')
+            bdf=get_stock_data(sym,market_map.get(sym))
             if bdf is not None:
                 ev=run_composite_backtest(sym,bdf,a2_h,a2_gap,a2_min)
                 if not ev.empty:all_a2.append(ev)
             pr.progress((i+1)/max(a2_n,1))
-        ss.empty();pr.empty();st.session_state['a2_bt']=pd.concat(all_a2,ignore_index=True) if all_a2 else pd.DataFrame()
+        ss.empty();pr.empty()
+        st.session_state['a2_bt']=pd.concat(all_a2,ignore_index=True) if all_a2 else pd.DataFrame()
     a2=st.session_state.get('a2_bt',pd.DataFrame())
     if not a2.empty:
-        rr=a2['報酬%'];c1,c2,c3,c4,c5=st.columns(5);c1.metric('樣本數',len(rr));c2.metric('勝率',f'{(rr>0).mean()*100:.1f}%');c3.metric('平均報酬',f'{rr.mean():+.2f}%');c4.metric('中位數',f'{rr.median():+.2f}%');c5.metric('報酬加總',f'{rr.sum():+.2f}%')
-        sb=summarize_score_buckets(a2);st.markdown('### 🎯 不同分數區間績效');st.dataframe(sb.style.format({'mean':'{:+.2f}%','median':'{:+.2f}%','sum':'{:+.2f}%','勝率%':'{:.1f}%'}),use_container_width=True,hide_index=True);st.bar_chart(sb.set_index('分數區間')['mean']);st.markdown('### 🧾 A2 回測明細');st.dataframe(a2.round(2),use_container_width=True,hide_index=True);st.download_button('⬇️ 匯出 A2 回測 CSV',a2.to_csv(index=False).encode('utf-8-sig'),'A2_composite_backtest.csv','text/csv')
-    else:st.info('尚未完成 A2 回測。')
+        rr=a2['報酬%'];c1,c2,c3,c4,c5=st.columns(5)
+        c1.metric('樣本數',len(rr));c2.metric('勝率',f'{(rr>0).mean()*100:.1f}%');c3.metric('平均報酬',f'{rr.mean():+.2f}%');c4.metric('中位數',f'{rr.median():+.2f}%');c5.metric('報酬加總',f'{rr.sum():+.2f}%')
+        sb=summarize_score_buckets(a2)
+        st.markdown('### 🎯 不同分數區間績效');st.dataframe(sb.style.format({'mean':'{:+.2f}%','median':'{:+.2f}%','sum':'{:+.2f}%','勝率%':'{:.1f}%'}),use_container_width=True,hide_index=True)
+        st.bar_chart(sb.set_index('分數區間')['mean'])
+        st.markdown('### 🧾 A2 回測明細');st.dataframe(a2.round(2),use_container_width=True,hide_index=True)
+        st.download_button('⬇️ 匯出 A2 回測 CSV',a2.to_csv(index=False).encode('utf-8-sig'),'A2_composite_backtest.csv','text/csv',key='dl_a2')
+    else:st.info('尚未完成 A2 回測。請按「▶ 開始 A2 綜合分數回測」。若完全沒有樣本，請先把最低分數降到 60～65 測試。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2｜智能掃描 2.0：分市場配額＋官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+    st.divider()
+    st.subheader('🧠 A2.1 綜合分數權重最佳化')
+    st.caption('A2.1 採有限、可解釋的權重候選；每檔股票依日期做 70% 訓練／30% 驗證，排序只看驗證集，避免把驗證資料拿來訓練。')
+    b1,b2,b3=st.columns(3)
+    with b1:a21_h=st.selectbox('A2.1 持有交易日',[1,3,5,10,20],index=2,key='a21_h')
+    with b2:a21_min=st.slider('A2.1 最低分數',50,90,70,5,key='a21_min')
+    with b3:a21_gap=st.selectbox('A2.1 冷卻天數',[0,3,5,10,20],index=1,key='a21_gap')
+    a21_n=st.slider('A2.1 股票數',1,min(100,len(symbols)),min(30,len(symbols)),1,key='a21_n')
+    if st.button('▶ 開始 A2.1 權重最佳化',type='primary',key='run_a21'):
+        pr=st.progress(0);ss=st.empty();hist=collect_a2_history(symbols[:a21_n],market_map,pr);ss.empty();pr.empty()
+        if hist.empty:
+            st.session_state['a21_rank']=pd.DataFrame();st.session_state['a21_all']=pd.DataFrame()
+        else:
+            top,all_rank=a21_optimize_weight_sets(hist,a21_h,a21_min,a21_gap,10)
+            st.session_state['a21_rank']=top;st.session_state['a21_all']=all_rank
+            st.session_state['a21_hist_n']=len(hist)
+    rank=st.session_state.get('a21_rank',pd.DataFrame())
+    if not rank.empty:
+        st.success(f"A2.1 完成：共建立 {st.session_state.get('a21_hist_n',0):,} 筆歷史樣本；以下為驗證集表現最佳的候選權重。")
+        st.markdown('### 🏆 A2.1 推薦權重')
+        best=rank.iloc[0]
+        best_df=pd.DataFrame({'項目':list(COMPOSITE_WEIGHTS),'原始權重':[COMPOSITE_WEIGHTS[k] for k in COMPOSITE_WEIGHTS],'推薦權重':[int(best[k]) for k in COMPOSITE_WEIGHTS],'差異':[int(best[k]-COMPOSITE_WEIGHTS[k]) for k in COMPOSITE_WEIGHTS],'說明':[A2_COMPONENT_DESC[k] for k in COMPOSITE_WEIGHTS]})
+        st.dataframe(best_df,use_container_width=True,hide_index=True)
+        st.metric('推薦權重總和',f"{sum(int(best[k]) for k in COMPOSITE_WEIGHTS)} / 100")
+        st.markdown('### 📊 A2.1 候選排名（驗證集）')
+        show=rank.copy();show['權重摘要']=show.apply(lambda r:' / '.join(f'{k}:{int(r[k])}' for k in COMPOSITE_WEIGHTS),axis=1)
+        show=show[['候選編號','樣本數','勝率%','平均報酬%','中位數報酬%','評分','權重摘要']]
+        st.dataframe(show.round(3),use_container_width=True,hide_index=True)
+        st.download_button('⬇️ 匯出 A2.1 權重最佳化 CSV',st.session_state['a21_all'].to_csv(index=False).encode('utf-8-sig'),'A2.1_weight_optimization.csv','text/csv',key='dl_a21')
+    else:st.info('尚未完成 A2.1。請按「▶ 開始 A2.1 權重最佳化」。')
+
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2/A2.1｜智能掃描 2.0：分市場配額＋官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
