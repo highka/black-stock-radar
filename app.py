@@ -8,7 +8,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.3
+# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2
 # V3.3.2：智能掃描 2.0（分市場配額＋流動性／動能排序＋技術精掃），V4 再接 Fugle 即時行情
 # ============================================================
 
@@ -409,6 +409,70 @@ def overall_backtest_stats(events):
     return {'樣本數':len(r),'勝率%':(r > 0).mean()*100,'平均報酬%':r.mean(),'中位數報酬%':r.median(),'報酬加總%':r.sum()}
 
 
+
+# ============================================================
+# 🖤 A2：綜合選股分數回測
+# ============================================================
+COMPOSITE_WEIGHTS={'智能流動性':15,'智能動能':10,'智能波動':5,'智能活躍':5,'MA多頭結構':15,'生命線':10,'RSI動能':10,'量價確認':10,'突破':10,'策略品質':5}
+
+def composite_score_from_row(r):
+    trend=min(float(r.get('趨勢分',0)),30)/30*15
+    momentum=min(float(r.get('動能分',0)),20)/20*10
+    volume=min(float(r.get('量能分',0)),20)/20*10
+    breakout=min(float(r.get('突破分',0)),15)/15*10
+    rsi=min(float(r.get('RSI分',0)),10)/10*10
+    ma200=r.get('MA200',np.nan); close=r.get('價格',np.nan); life=0
+    if pd.notna(ma200) and pd.notna(close):
+        dist=close/ma200-1
+        if close>=ma200 and dist<=.05: life=10
+        elif close>ma200: life=max(5,10-min(dist*100,5))
+        elif dist>=-.03: life=5
+        elif dist>=-.08: life=2
+    smart=r.get('智能初篩分',np.nan)
+    if pd.notna(smart):
+        smart_liq=min(max(float(smart)/100*15,0),15)
+        smart_mom=min(max((float(r.get('漲跌%',0))+10)/20*10,0),10)
+        smart_vol=min(max(float(r.get('當日振幅%',0))/20*5,0),5)
+        smart_act=5 if float(r.get('成交量',0))>0 else 0
+    else: smart_liq=smart_mom=smart_vol=smart_act=0
+    sig=str(r.get('訊號','')); strategy=min(5,max(0,sig.count('、')+1)) if sig else 0
+    parts={'智能流動性':smart_liq,'智能動能':smart_mom,'智能波動':smart_vol,'智能活躍':smart_act,'MA多頭結構':trend,'生命線':life,'RSI動能':rsi,'量價確認':volume,'突破':breakout,'策略品質':strategy}
+    return round(min(100,max(0,sum(parts.values()))),2),parts
+
+def add_composite_columns(result):
+    if result.empty:return result
+    vals=result.apply(composite_score_from_row,axis=1); result=result.copy()
+    result['綜合分數']=[x[0] for x in vals]
+    for k in COMPOSITE_WEIGHTS: result[k]=[x[1][k] for x in vals]
+    result['綜合等級']=result['綜合分數'].map(lambda s:'S' if s>=90 else 'A' if s>=80 else 'B' if s>=70 else 'C' if s>=60 else 'D')
+    return result
+
+def historical_composite_events(df):
+    if df is None or len(df)<210:return pd.DataFrame()
+    events=[]
+    for i in range(200,len(df)):
+        hist=indicators(df.iloc[:i+1].copy()); x=hist.iloc[-1]; score,bd,_=black_score(hist)
+        row={'價格':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0,'成交量':float(x.Volume),'量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0,'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,'MA20':x.MA20,'MA60':x.MA60,'MA200':x.MA200,'趨勢分':bd['趨勢'],'動能分':bd['動能'],'量能分':bd['成交量'],'突破分':bd['突破'],'RSI分':bd['RSI'],'訊號':'、'.join(signals(hist,score)),'智能初篩分':np.nan,'當日振幅%':float((x.High-x.Low)/x.Close*100) if x.Close else 0}
+        comp,parts=composite_score_from_row(row)
+        events.append({'日期':hist.index[-1],'綜合分數':comp,'黑嚕嚕技術分數':score,**{k:round(v,2) for k,v in parts.items()},'收盤':float(x.Close),'漲跌%':row['漲跌%'],'量比':row['量比'],'RSI':row['RSI']})
+    return pd.DataFrame(events)
+
+def run_composite_backtest(symbol,df,horizon,min_gap,min_score):
+    ev=historical_composite_events(df)
+    if ev.empty:return pd.DataFrame()
+    ev=ev[ev['綜合分數']>=min_score]; close=df['Close']; highs=df['High']; lows=df['Low']; idx=list(close.index); pos={pd.Timestamp(x):i for i,x in enumerate(idx)}; rows=[]; last=None
+    for _,e in ev.sort_values('日期').iterrows():
+        i=pos.get(pd.Timestamp(e['日期']))
+        if i is None or i+horizon>=len(idx) or (last is not None and i-last<min_gap):continue
+        entry=float(close.iloc[i]); ex=float(close.iloc[i+horizon]); fh=highs.iloc[i+1:i+horizon+1]; fl=lows.iloc[i+1:i+horizon+1]
+        rows.append({'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'訊號日期':pd.Timestamp(e['日期']),'出場日期':idx[i+horizon],'持有天數':horizon,'進場價':entry,'出場價':ex,'報酬%':(ex/entry-1)*100,'MFE%':(float(fh.max())/entry-1)*100 if len(fh) else 0,'MAE%':(float(fl.min())/entry-1)*100 if len(fl) else 0,'綜合分數':e['綜合分數'],'黑嚕嚕技術分數':e['黑嚕嚕技術分數']}); last=i
+    return pd.DataFrame(rows)
+
+def summarize_score_buckets(bt):
+    if bt.empty:return pd.DataFrame()
+    def b(s):return '90–100' if s>=90 else '80–89' if s>=80 else '70–79' if s>=70 else '60–69' if s>=60 else '0–59'
+    x=bt.copy();x['分數區間']=x['綜合分數'].map(b);g=x.groupby('分數區間')['報酬%'];o=g.agg(['count','mean','median','sum']).reset_index();o['勝率%']=x.groupby('分數區間')['報酬%'].apply(lambda z:(z>0).mean()*100).values;return o.set_index('分數區間').reindex(['90–100','80–89','70–79','60–69','0–59']).reset_index()
+
 # Sidebar
 st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3｜全市場股票池＋V3.2 回測')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
@@ -474,7 +538,7 @@ for i,s in enumerate(symbols):
     p.progress((i+1)/max(len(symbols),1))
 status.empty();p.empty()
 if not rows:st.warning('目前沒有符合條件的股票。可以降低最低黑嚕嚕分數、量比、RSI／漲跌幅，或增加股票池。');st.stop()
-result=pd.DataFrame(rows);sort_col={'黑嚕嚕分數':'黑嚕嚕分數','漲跌幅':'漲跌%','量比':'量比','RSI':'RSI','價格':'價格'}[sort_mode];result=result.sort_values(sort_col,ascending=False,na_position='last').reset_index(drop=True)
+result=pd.DataFrame(rows);result=add_composite_columns(result);sort_col={'黑嚕嚕分數':'黑嚕嚕分數','漲跌幅':'漲跌%','量比':'量比','RSI':'RSI','價格':'價格'}[sort_mode];result=result.sort_values(sort_col,ascending=False,na_position='last').reset_index(drop=True)
 
 strong=int((result['黑嚕嚕分數']>=80).sum());breakout=int(result['訊號'].str.contains('🚀 強勢突破',regex=False).sum());risk=int(result['訊號'].str.contains('⚠️ 爆量高危',regex=False).sum());weak=int(result['訊號'].str.contains('🔴 趨勢轉弱',regex=False).sum())
 a,b,c,d,e=st.columns(5);a.metric('符合條件',f'{len(result)} 檔');b.metric('🔥 80分以上',f'{strong} 檔');c.metric('🚀 突破',f'{breakout} 檔');d.metric('⚠️ 高危',f'{risk} 檔');e.metric('🔴 轉弱',f'{weak} 檔');st.divider()
@@ -484,9 +548,9 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　RSI {r['RSI']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測'])
+t1,t2,t3,t4,t5,t6,t7=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測'])
 with t1:
-    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','RSI','黑嚕嚕分數','等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['RSI']=show['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
+    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','RSI','黑嚕嚕分數','綜合分數','綜合等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['RSI']=show['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
 with t2:
     st.subheader('🚨 黑嚕嚕訊號中心')
@@ -508,7 +572,7 @@ with t5:
     st.subheader('⭐ 自選股');watch=st.multiselect('加入自選股',result['股票'].tolist(),default=[],key='watchlist')
     if not watch:st.info('請從上方選擇股票加入自選股。')
     else:
-        q=result[result['股票'].isin(watch)].sort_values('黑嚕嚕分數',ascending=False)[['股票','名稱','價格','漲跌%','量比','RSI','黑嚕嚕分數','等級','訊號']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['RSI']=q['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
+        q=result[result['股票'].isin(watch)].sort_values('黑嚕嚕分數',ascending=False)[['股票','名稱','價格','漲跌%','量比','RSI','黑嚕嚕分數','綜合分數','綜合等級','訊號']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['RSI']=q['RSI'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
 
 
 with t6:
@@ -566,5 +630,28 @@ with t6:
         st.download_button('⬇️ 匯出 V3.2 回測 CSV',bt_result.to_csv(index=False).encode('utf-8-sig'),'v3.2_backtest.csv','text/csv')
     else:
         st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
+
+with t7:
+    st.subheader('🖤 A2 綜合選股分數回測')
+    st.caption('比較不同綜合分數門檻在 1／3／5／10／20 個交易日的歷史表現；訊號日收盤進場，N個交易日後收盤出場。')
+    c1,c2,c3=st.columns(3)
+    with c1:a2_h=st.selectbox('A2 持有交易日',[1,3,5,10,20],index=2,key='a2_h')
+    with c2:a2_gap=st.selectbox('A2 冷卻天數',[0,3,5,10,20],index=1,key='a2_gap')
+    with c3:a2_min=st.slider('A2 最低綜合分數',0,100,70,5,key='a2_min')
+    a2_n=st.slider('A2 回測股票數',1,min(50,len(symbols)),min(20,len(symbols)),1,key='a2_n')
+    if st.button('▶ 開始 A2 綜合分數回測',type='primary'):
+        all_a2=[];pr=st.progress(0);ss=st.empty()
+        for i,sym in enumerate(symbols[:a2_n]):
+            ss.text(f'正在 A2 回測：{sym} {stock_name(sym)} ({i+1}/{a2_n})');bdf=get_stock_data(sym,market_map.get(sym))
+            if bdf is not None:
+                ev=run_composite_backtest(sym,bdf,a2_h,a2_gap,a2_min)
+                if not ev.empty:all_a2.append(ev)
+            pr.progress((i+1)/max(a2_n,1))
+        ss.empty();pr.empty();st.session_state['a2_bt']=pd.concat(all_a2,ignore_index=True) if all_a2 else pd.DataFrame()
+    a2=st.session_state.get('a2_bt',pd.DataFrame())
+    if not a2.empty:
+        rr=a2['報酬%'];c1,c2,c3,c4,c5=st.columns(5);c1.metric('樣本數',len(rr));c2.metric('勝率',f'{(rr>0).mean()*100:.1f}%');c3.metric('平均報酬',f'{rr.mean():+.2f}%');c4.metric('中位數',f'{rr.median():+.2f}%');c5.metric('報酬加總',f'{rr.sum():+.2f}%')
+        sb=summarize_score_buckets(a2);st.markdown('### 🎯 不同分數區間績效');st.dataframe(sb.style.format({'mean':'{:+.2f}%','median':'{:+.2f}%','sum':'{:+.2f}%','勝率%':'{:.1f}%'}),use_container_width=True,hide_index=True);st.bar_chart(sb.set_index('分數區間')['mean']);st.markdown('### 🧾 A2 回測明細');st.dataframe(a2.round(2),use_container_width=True,hide_index=True);st.download_button('⬇️ 匯出 A2 回測 CSV',a2.to_csv(index=False).encode('utf-8-sig'),'A2_composite_backtest.csv','text/csv')
+    else:st.info('尚未完成 A2 回測。')
 
 st.divider();st.caption('🖤 黑嚕嚕 V3.3.2｜智能掃描 2.0：分市場配額＋官方行情初篩＋yfinance 2 年技術分析；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
