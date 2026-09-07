@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2.3.2
-# V3.3.2：智能掃描 2.0；A2.3：Strategy Lab 四策略PK＋門檻／持有期矩陣＋官方 API 穩定層，V4 再接 Fugle 即時行情
+# V3.3.2：智能掃描 2.0；A2.3：Strategy Lab 八策略PK＋門檻／持有期矩陣＋官方 API 穩定層，V4 再接 Fugle 即時行情
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -839,7 +839,7 @@ def prepare_diag_history(history):
 
 # ============================================================
 # 🧪 A2.3 Strategy Lab
-# 四策略公平 PK：
+# 八策略公平 PK：
 #   1) MA20 + RSI
 #   2) MA15 + RSI
 #   3) MA20 + KD
@@ -853,10 +853,14 @@ def prepare_diag_history(history):
 # ============================================================
 
 A23_STRATEGIES = {
-    'MA20＋RSI': {'fast_ma':20, 'osc':'RSI'},
     'MA15＋RSI': {'fast_ma':15, 'osc':'RSI'},
-    'MA20＋KD':  {'fast_ma':20, 'osc':'KD'},
+    'MA20＋RSI': {'fast_ma':20, 'osc':'RSI'},
+    'MA30＋RSI': {'fast_ma':30, 'osc':'RSI'},
+    'MA60＋RSI': {'fast_ma':60, 'osc':'RSI'},
     'MA15＋KD':  {'fast_ma':15, 'osc':'KD'},
+    'MA20＋KD':  {'fast_ma':20, 'osc':'KD'},
+    'MA30＋KD':  {'fast_ma':30, 'osc':'KD'},
+    'MA60＋KD':  {'fast_ma':60, 'osc':'KD'},
 }
 
 def indicators_strategy_lab(d, fast_ma=15, osc='KD'):
@@ -1114,7 +1118,7 @@ def strategy_lab_summary(grid, min_samples=20):
 
 
 # ============================================================
-# 🧪 A2.3.2 Strategy Lab Pro
+# 🧪 A2.3.3 Strategy Lab Pro
 # 新增：
 # 1) 95% 平均報酬信賴區間（常態近似）
 # 2) 穩健候選：樣本數達標且 95% CI 下限 > 0
@@ -1258,7 +1262,7 @@ def strategy_lab_band_summary(band_grid, min_samples=20):
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.2 Strategy Lab Pro')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.3 Strategy Lab Pro')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新全市場股票池'):
@@ -1296,7 +1300,7 @@ if scan_mode.startswith('🧠'):
 else:
     symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3｜智能掃描 2.0＋A2.2 策略健診＋A2.3 Strategy Lab 四策略PK；行情仍為 yfinance 日資料。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3｜智能掃描 2.0＋A2.2 策略健診＋A2.3 Strategy Lab 八策略PK；行情仍為 yfinance 日資料。')
 a,b,c,d,e=st.columns(5);a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔');c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
 if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' in smart_pool.columns:
     with st.expander('🔎 查看 V3.3.2 智能候選池',expanded=False):
@@ -1515,17 +1519,22 @@ with t8:
 
 
 with t9:
-    st.subheader('🧪 A2.3.2 Strategy Lab Pro｜四策略公平 PK＋穩健度＋甜蜜區')
+    st.subheader('🧪 A2.3.3 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
     st.caption('同一批股票、同一段歷史、同一進出場規則，只比較「MA15 / MA20」與「RSI / KD」。目標是找出真正的甜蜜點，而不是假設最高分一定最好。')
 
-    st.markdown('### 🧬 本版比較的四套策略')
+    st.markdown('### 🧬 本版比較的八套策略')
     strategy_desc=pd.DataFrame([
-        {'策略':'MA20＋RSI','快均線':'MA20','動能':'RSI14','用途':'較慢趨勢＋傳統動能'},
-        {'策略':'MA15＋RSI','快均線':'MA15','動能':'RSI14','用途':'較快趨勢＋傳統動能'},
-        {'策略':'MA20＋KD','快均線':'MA20','動能':'9日KD','用途':'較慢趨勢＋KD轉折'},
-        {'策略':'MA15＋KD','快均線':'MA15','動能':'9日KD','用途':'目前 A2.2 基準'}
+        {'策略':'MA15＋RSI','快均線':'MA15','動能':'RSI14','用途':'快速趨勢＋傳統動能'},
+        {'策略':'MA20＋RSI','快均線':'MA20','動能':'RSI14','用途':'短中期趨勢＋傳統動能'},
+        {'策略':'MA30＋RSI','快均線':'MA30','動能':'RSI14','用途':'中期趨勢＋傳統動能'},
+        {'策略':'MA60＋RSI','快均線':'MA60','動能':'RSI14','用途':'波段趨勢＋傳統動能'},
+        {'策略':'MA15＋KD','快均線':'MA15','動能':'9日KD','用途':'快速趨勢＋KD轉折'},
+        {'策略':'MA20＋KD','快均線':'MA20','動能':'9日KD','用途':'短中期趨勢＋KD轉折'},
+        {'策略':'MA30＋KD','快均線':'MA30','動能':'9日KD','用途':'中期趨勢＋KD轉折'},
+        {'策略':'MA60＋KD','快均線':'MA60','動能':'9日KD','用途':'波段趨勢＋KD轉折'}
     ])
     st.dataframe(strategy_desc,use_container_width=True,hide_index=True)
+    st.info('A2.3.3 新增 MA30 與 MA60，與 MA15/MA20 公平 PK；MA200 生命線仍保留。MA60 主要用來測試較慢的波段趨勢濾網。')
 
     a,b,c,d=st.columns(4)
     with a:
@@ -1535,7 +1544,7 @@ with t9:
     with c:
         a23_min_samples=st.number_input('最低有效樣本數',min_value=5,max_value=500,value=20,step=5,key='a23_min_samples')
     with d:
-        st.metric('策略組合','4 套')
+        st.metric('策略組合','8 套')
 
     a23_thresholds=st.multiselect('要比較的最低分數',[50,55,60,65,70,75,80,85,90],default=[65,70,75,80,85,90],key='a23_thresholds')
     a23_horizons=st.multiselect('要比較的持有交易日',[1,3,5,10,20],default=[3,5,10,20],key='a23_horizons')
@@ -1574,7 +1583,7 @@ with t9:
                '報酬加總%':'{:+.2f}%','Profit Factor':'{:.2f}','Expectancy%':'{:+.2f}%',
                '最大回撤%':'{:+.2f}%','平均獲利%':'{:+.2f}%','平均虧損%':'{:+.2f}%'}
 
-        st.markdown('### 🏆 ① 四策略最佳組合')
+        st.markdown('### 🏆 ① 八策略最佳組合')
         sm23=strategy_lab_summary(grid23,int(a23_min_samples))
         if sm23.empty or sm23['平均報酬%'].notna().sum()==0:
             st.warning('目前沒有任何組合達到最低有效樣本數。可降低「最低有效樣本數」或增加回測股票數。')
@@ -1600,7 +1609,7 @@ with t9:
 
         st.markdown('### 🗺️ ③ 策略 × 分數 × 持有期矩陣')
         metric23=st.selectbox('矩陣顯示指標',['平均報酬%','勝率%','Profit Factor','最大回撤%','樣本數'],index=0,key='a23_metric')
-        strategy23=st.selectbox('查看策略',list(A23_STRATEGIES.keys()),index=3,key='a23_strategy_view')
+        strategy23=st.selectbox('查看策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋KD'),key='a23_strategy_view')
         sub23=grid23[grid23['策略']==strategy23]
         if not sub23.empty:
             pv23=sub23.pivot(index='最低分數',columns='持有交易日',values=metric23)
@@ -1613,7 +1622,7 @@ with t9:
             else:
                 st.dataframe(pv23.style.format('{:.0f}'),use_container_width=True)
 
-        st.markdown('### 📊 ④ 四策略在相同條件下直接 PK')
+        st.markdown('### 📊 ④ 八策略在相同條件下直接 PK')
         q1,q2=st.columns(2)
         with q1:
             common_th=st.selectbox('固定最低分數',sorted(grid23['最低分數'].unique().tolist()),index=0,key='a23_common_th')
@@ -1674,7 +1683,7 @@ with t9:
 
             b1,b2=st.columns(2)
             with b1:
-                band_strategy=st.selectbox('甜蜜區策略',list(A23_STRATEGIES.keys()),index=3,key='a232_band_strategy')
+                band_strategy=st.selectbox('甜蜜區策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋KD'),key='a232_band_strategy')
             with b2:
                 band_horizon=st.selectbox('甜蜜區持有日',sorted(band23['持有交易日'].dropna().unique().tolist()),key='a232_band_horizon')
             view_band=band23[(band23['策略']==band_strategy)&(band23['持有交易日']==band_horizon)].copy()
@@ -1705,11 +1714,11 @@ with t9:
                                hist23.to_csv(index=False).encode('utf-8-sig'),
                                'A2.3_strategy_lab_history.csv','text/csv',key='a23_dl_hist')
         if band23 is not None and not band23.empty:
-            st.download_button('⬇️ 匯出 A2.3.2 分數甜蜜區 CSV',
+            st.download_button('⬇️ 匯出 A2.3.3 分數甜蜜區 CSV',
                                band23.to_csv(index=False).encode('utf-8-sig'),
-                               'A2.3.2_score_band_analysis.csv','text/csv',key='a232_dl_band')
+                               'A2.3.3_score_band_analysis.csv','text/csv',key='a232_dl_band')
     else:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 四策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.2｜Strategy Lab Pro 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.3｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
