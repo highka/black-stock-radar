@@ -8,7 +8,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2.3
+# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2.3.2
 # V3.3.2：智能掃描 2.0；A2.3：Strategy Lab 四策略PK＋門檻／持有期矩陣＋官方 API 穩定層，V4 再接 Fugle 即時行情
 # ============================================================
 
@@ -1112,8 +1112,153 @@ def strategy_lab_summary(grid, min_samples=20):
     return pd.DataFrame(rows).sort_values(['平均報酬%','Profit Factor'],ascending=False,na_position='last').reset_index(drop=True)
 
 
+
+# ============================================================
+# 🧪 A2.3.2 Strategy Lab Pro
+# 新增：
+# 1) 95% 平均報酬信賴區間（常態近似）
+# 2) 穩健候選：樣本數達標且 95% CI 下限 > 0
+# 3) 分數區間分析：避免「>=70」把 70~100 全混在一起
+# 4) 每套策略甜蜜區間判定
+# ============================================================
+
+A232_SCORE_BINS = [-np.inf, 60, 65, 70, 75, 80, 85, 90, np.inf]
+A232_SCORE_LABELS = ['<60','60–64','65–69','70–74','75–79','80–84','85–89','90+']
+
+def _trade_metrics_ci(returns):
+    """在既有 trade metrics 上補 95% CI 與報酬標準差。"""
+    s=pd.Series(returns,dtype=float).replace([np.inf,-np.inf],np.nan).dropna()
+    base=_trade_metrics(s)
+    n=len(s)
+    if n>=2:
+        sd=float(s.std(ddof=1))
+        se=sd/np.sqrt(n)
+        lo=float(s.mean()-1.96*se)
+        hi=float(s.mean()+1.96*se)
+    elif n==1:
+        sd=np.nan;lo=np.nan;hi=np.nan
+    else:
+        sd=np.nan;lo=np.nan;hi=np.nan
+    base.update({
+        '報酬標準差%':round(sd,3) if pd.notna(sd) else np.nan,
+        '平均報酬95%CI下限':round(lo,3) if pd.notna(lo) else np.nan,
+        '平均報酬95%CI上限':round(hi,3) if pd.notna(hi) else np.nan,
+    })
+    return base
+
+def strategy_lab_grid_pro(history, thresholds, horizons, min_gap=3):
+    """A2.3.2：與原 A2.3 相同的門檻回測，但加入信賴區間。"""
+    rows=[]
+    for hzn in horizons:
+        f=add_forward_returns_a23(history,hzn).dropna(subset=['未來報酬%'])
+        for strategy_name in A23_STRATEGIES:
+            sf=f[f['策略']==strategy_name]
+            for th in thresholds:
+                sel=select_a23(sf,th,min_gap)
+                metrics=_trade_metrics_ci(sel['未來報酬%'] if not sel.empty else [])
+                rows.append({'策略':strategy_name,'最低分數':int(th),'持有交易日':int(hzn),**metrics})
+    return pd.DataFrame(rows)
+
+def strategy_lab_band_grid(history, horizons, min_gap=3):
+    """
+    分數「區間」分析，不是最低門檻。
+    例如 75–79 只看 75~79，不會把 80、90 分混進來。
+    """
+    rows=[]
+    if history is None or history.empty:return pd.DataFrame()
+    for hzn in horizons:
+        f=add_forward_returns_a23(history,hzn).dropna(subset=['未來報酬%']).copy()
+        f['分數區間']=pd.cut(
+            pd.to_numeric(f['綜合分數'],errors='coerce'),
+            bins=A232_SCORE_BINS,
+            labels=A232_SCORE_LABELS,
+            right=False
+        )
+        # 先用完整歷史位置做 cooldown，再限制分數區間
+        base=f.sort_values(['策略','股票','日期']).copy()
+        base['_trade_pos']=base.groupby(['策略','股票']).cumcount()
+        for strategy_name in A23_STRATEGIES:
+            sf=base[base['策略']==strategy_name]
+            for label in A232_SCORE_LABELS:
+                band=sf[sf['分數區間'].astype(str)==label].copy()
+                chosen=[]
+                for sym,g in band.groupby('股票',sort=False):
+                    last=-10**9
+                    for _,row in g.sort_values('日期').iterrows():
+                        pos=int(row['_trade_pos'])
+                        if pos-last<int(min_gap):continue
+                        chosen.append(row)
+                        last=pos
+                sel=pd.DataFrame(chosen)
+                metrics=_trade_metrics_ci(sel['未來報酬%'] if not sel.empty else [])
+                rows.append({
+                    '策略':strategy_name,'分數區間':label,'持有交易日':int(hzn),**metrics
+                })
+    return pd.DataFrame(rows)
+
+def strategy_lab_robust_rank(grid, min_samples=20):
+    """
+    穩健排名：
+    - 必須達最低樣本數
+    - 先看 95% CI 下限
+    - 再看平均報酬、PF、勝率
+    不另外創造不可解釋的黑箱分數。
+    """
+    if grid is None or grid.empty:return pd.DataFrame()
+    x=grid.copy()
+    valid=x[
+        (x['樣本數']>=int(min_samples)) &
+        x['平均報酬%'].notna() &
+        x['平均報酬95%CI下限'].notna()
+    ].copy()
+    if valid.empty:return pd.DataFrame()
+    valid['穩健候選']=np.where(valid['平均報酬95%CI下限']>0,'✅','—')
+    valid=valid.sort_values(
+        ['穩健候選','平均報酬95%CI下限','平均報酬%','Profit Factor','勝率%','樣本數'],
+        ascending=[True,False,False,False,False,False]
+    ).reset_index(drop=True)
+    # 讓 ✅ 真正排前面
+    valid['_robust']=(valid['穩健候選']=='✅').astype(int)
+    valid=valid.sort_values(
+        ['_robust','平均報酬95%CI下限','平均報酬%','Profit Factor','勝率%','樣本數'],
+        ascending=[False,False,False,False,False,False]
+    ).drop(columns=['_robust']).reset_index(drop=True)
+    valid.insert(0,'穩健排名',np.arange(1,len(valid)+1))
+    return valid
+
+def strategy_lab_band_summary(band_grid, min_samples=20):
+    """每套策略找出最佳「真正分數區間」。"""
+    if band_grid is None or band_grid.empty:return pd.DataFrame()
+    rows=[]
+    for strategy_name,g in band_grid.groupby('策略'):
+        v=g[(g['樣本數']>=int(min_samples)) & g['平均報酬%'].notna()].copy()
+        if v.empty:continue
+        v['_robust']=(v['平均報酬95%CI下限'].fillna(-999)>0).astype(int)
+        best=v.sort_values(
+            ['_robust','平均報酬95%CI下限','平均報酬%','Profit Factor','樣本數'],
+            ascending=[False,False,False,False,False]
+        ).iloc[0]
+        rows.append({
+            '策略':strategy_name,
+            '甜蜜分數區間':best['分數區間'],
+            '最佳持有日':int(best['持有交易日']),
+            '樣本數':int(best['樣本數']),
+            '勝率%':best['勝率%'],
+            '平均報酬%':best['平均報酬%'],
+            '95%CI下限':best['平均報酬95%CI下限'],
+            '95%CI上限':best['平均報酬95%CI上限'],
+            'Profit Factor':best['Profit Factor'],
+            '最大回撤%':best['最大回撤%'],
+            '穩健候選':'✅' if pd.notna(best['平均報酬95%CI下限']) and best['平均報酬95%CI下限']>0 else '—'
+        })
+    return pd.DataFrame(rows).sort_values(
+        ['穩健候選','95%CI下限','平均報酬%','Profit Factor'],
+        ascending=[True,False,False,False]
+    ).reset_index(drop=True) if rows else pd.DataFrame()
+
+
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3 Strategy Lab')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.2 Strategy Lab Pro')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新全市場股票池'):
@@ -1370,7 +1515,7 @@ with t8:
 
 
 with t9:
-    st.subheader('🧪 A2.3 Strategy Lab｜四策略公平 PK')
+    st.subheader('🧪 A2.3.2 Strategy Lab Pro｜四策略公平 PK＋穩健度＋甜蜜區')
     st.caption('同一批股票、同一段歷史、同一進出場規則，只比較「MA15 / MA20」與「RSI / KD」。目標是找出真正的甜蜜點，而不是假設最高分一定最好。')
 
     st.markdown('### 🧬 本版比較的四套策略')
@@ -1408,10 +1553,13 @@ with t9:
             if hist23.empty:
                 st.session_state['a23_hist']=pd.DataFrame()
                 st.session_state['a23_grid']=pd.DataFrame()
+                st.session_state['a23_band_grid']=pd.DataFrame()
             else:
-                grid23=strategy_lab_grid(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+                grid23=strategy_lab_grid_pro(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+                band23=strategy_lab_band_grid(hist23,a23_horizons,int(a23_gap))
                 st.session_state['a23_hist']=hist23
                 st.session_state['a23_grid']=grid23
+                st.session_state['a23_band_grid']=band23
                 st.session_state['a23_settings']={
                     '股票數':int(a23_n),'冷卻':int(a23_gap),
                     '門檻':list(a23_thresholds),'持有日':list(a23_horizons)
@@ -1419,6 +1567,7 @@ with t9:
 
     grid23=st.session_state.get('a23_grid',pd.DataFrame())
     hist23=st.session_state.get('a23_hist',pd.DataFrame())
+    band23=st.session_state.get('a23_band_grid',pd.DataFrame())
 
     if not grid23.empty:
         fmt23={'勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
@@ -1476,8 +1625,76 @@ with t9:
         if not direct.empty:
             st.bar_chart(direct.set_index('策略')['平均報酬%'])
 
-        st.markdown('### 🔬 ⑤ 研究結論提醒')
-        st.write('A2.3 的目的不是只挑「平均報酬最高」；你要同時看樣本數、Profit Factor、最大回撤與勝率。若冠軍只靠很少樣本，先視為候選，不直接定版。')
+
+        st.markdown('### 🛡️ ⑤ A2.3.2 穩健度排名｜加入 95% 信賴區間')
+        robust23=strategy_lab_robust_rank(grid23,int(a23_min_samples))
+        if robust23.empty:
+            st.info('目前沒有足夠樣本可做穩健排名。')
+        else:
+            robust_cols=[
+                '穩健排名','穩健候選','策略','最低分數','持有交易日','樣本數',
+                '勝率%','平均報酬%','平均報酬95%CI下限','平均報酬95%CI上限',
+                'Profit Factor','最大回撤%'
+            ]
+            st.dataframe(
+                robust23[robust_cols].head(30).style.format({
+                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
+                    '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
+                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+                }),
+                use_container_width=True,hide_index=True
+            )
+            robust_ok=robust23[robust23['穩健候選']=='✅']
+            if not robust_ok.empty:
+                rb=robust_ok.iloc[0]
+                st.success(
+                    f"目前較穩健候選：{rb['策略']}｜最低 {int(rb['最低分數'])} 分｜"
+                    f"持有 {int(rb['持有交易日'])} 日｜平均 {rb['平均報酬%']:+.2f}%｜"
+                    f"95% CI 下限 {rb['平均報酬95%CI下限']:+.2f}%｜PF {rb['Profit Factor']:.2f}"
+                )
+            else:
+                st.warning('目前沒有組合的「平均報酬 95% CI 下限 > 0」。這不代表策略無效，但代表證據還不夠穩健，建議增加股票數與樣本。')
+
+        st.markdown('### 🎯 ⑥ 真正分數甜蜜區｜70–74、75–79、80–84 分開看')
+        if band23 is None or band23.empty:
+            st.info('尚無分數區間資料，請重新執行 A2.3。')
+        else:
+            sweet23=strategy_lab_band_summary(band23,int(a23_min_samples))
+            if sweet23.empty:
+                st.info('目前各分數區間樣本不足。')
+            else:
+                st.dataframe(
+                    sweet23.style.format({
+                        '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
+                        '95%CI下限':'{:+.2f}%','95%CI上限':'{:+.2f}%',
+                        'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+                    }),
+                    use_container_width=True,hide_index=True
+                )
+
+            b1,b2=st.columns(2)
+            with b1:
+                band_strategy=st.selectbox('甜蜜區策略',list(A23_STRATEGIES.keys()),index=3,key='a232_band_strategy')
+            with b2:
+                band_horizon=st.selectbox('甜蜜區持有日',sorted(band23['持有交易日'].dropna().unique().tolist()),key='a232_band_horizon')
+            view_band=band23[(band23['策略']==band_strategy)&(band23['持有交易日']==band_horizon)].copy()
+            order_map={v:i for i,v in enumerate(A232_SCORE_LABELS)}
+            view_band['_order']=view_band['分數區間'].map(order_map)
+            view_band=view_band.sort_values('_order').drop(columns=['_order'])
+            if not view_band.empty:
+                st.dataframe(
+                    view_band[['分數區間','樣本數','勝率%','平均報酬%','平均報酬95%CI下限',
+                               '平均報酬95%CI上限','Profit Factor','最大回撤%']].style.format({
+                        '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
+                        '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
+                        'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+                    }),
+                    use_container_width=True,hide_index=True
+                )
+                st.bar_chart(view_band.set_index('分數區間')['平均報酬%'])
+
+        st.markdown('### 🔬 ⑦ 研究結論提醒')
+        st.write('A2.3.2 不只挑「平均報酬最高」；現在同時看樣本數、Profit Factor、最大回撤、勝率與 95% 信賴區間。若冠軍只靠很少樣本，先視為候選，不直接定版。')
         st.warning('A2.3 仍屬研究性回測：目前股票池存在存活者偏差；智能四項是 OHLCV 歷史代理；未計手續費、交易稅、滑價、漲跌停與實際資金部位。下一階段應做 A2.4 走勢外樣本／投資組合回測。')
 
         st.download_button('⬇️ 匯出 A2.3 全策略比較 CSV',
@@ -1487,8 +1704,12 @@ with t9:
             st.download_button('⬇️ 匯出 A2.3 歷史分數明細 CSV',
                                hist23.to_csv(index=False).encode('utf-8-sig'),
                                'A2.3_strategy_lab_history.csv','text/csv',key='a23_dl_hist')
+        if band23 is not None and not band23.empty:
+            st.download_button('⬇️ 匯出 A2.3.2 分數甜蜜區 CSV',
+                               band23.to_csv(index=False).encode('utf-8-sig'),
+                               'A2.3.2_score_band_analysis.csv','text/csv',key='a232_dl_band')
     else:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 四策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.1｜Strategy Lab 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.2｜Strategy Lab Pro 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
