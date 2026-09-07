@@ -625,6 +625,9 @@ def historical_composite_events(df, weights=None):
         events.append({'日期':hist.index[-1],'綜合分數':score,'黑嚕嚕技術分數':tech_score,
                        **parts,'收盤':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0,
                        '量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0,
+                       'MA15':float(x.MA15) if pd.notna(x.MA15) else np.nan,
+                       'MA60':float(x.MA60) if pd.notna(x.MA60) else np.nan,
+                       'MA200':float(x.MA200) if pd.notna(x.MA200) else np.nan,
                        'K':float(x.K) if pd.notna(x.K) else np.nan,'D':float(x.D) if pd.notna(x.D) else np.nan,'訊號':sig})
     return pd.DataFrame(events)
 
@@ -805,11 +808,32 @@ def diagnostic_overheat(history,min_score=90,min_gap=3,horizon=5):
 
 def prepare_diag_history(history):
     if history is None or history.empty:return pd.DataFrame()
-    h=history.copy().sort_values(['股票','日期']).reset_index(drop=True);h['5日漲幅%']=np.nan;h['距MA15%']=np.nan
+    h=history.copy().sort_values(['股票','日期']).reset_index(drop=True)
+    h['5日漲幅%']=np.nan
+    h['距MA15%']=np.nan
+
+    # A2.3.1 防呆：
+    # historical_composite_events 正常會直接提供 MA15。
+    # 若 Streamlit session_state 還留著舊版資料，或歷史資料缺欄位，
+    # 就以各股票收盤價 rolling(15) 重建，避免 KeyError 讓整頁中斷。
+    if 'MA15' not in h.columns:
+        h['MA15']=np.nan
+        for sym,g in h.groupby('股票',sort=False):
+            ix=g.index
+            close=pd.to_numeric(g['收盤'],errors='coerce')
+            h.loc[ix,'MA15']=close.rolling(15,min_periods=1).mean().values
+
     for sym,g in h.groupby('股票',sort=False):
-        ix=g.index;close=g['收盤'].astype(float);ma15=g['MA15'].astype(float)
+        ix=g.index
+        close=pd.to_numeric(g['收盤'],errors='coerce')
+        ma15=pd.to_numeric(g['MA15'],errors='coerce')
+
+        # 若單一股票 MA15 有零星缺值，再用 rolling(15) 補齊
+        ma15_fallback=close.rolling(15,min_periods=1).mean()
+        ma15=ma15.where(ma15.notna(),ma15_fallback)
+
         h.loc[ix,'5日漲幅%']=close.div(close.shift(5)).sub(1).mul(100).values
-        h.loc[ix,'距MA15%']=close.div(ma15).sub(1).mul(100).values
+        h.loc[ix,'距MA15%']=close.div(ma15.replace(0,np.nan)).sub(1).mul(100).values
     return h
 
 
@@ -1467,4 +1491,4 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 四策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3｜Strategy Lab 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.1｜Strategy Lab 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
