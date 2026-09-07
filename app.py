@@ -8,8 +8,8 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2/A2.1
-# V3.3.2：智能掃描 2.0（分市場配額＋流動性／動能排序＋技術精掃），V4 再接 Fugle 即時行情
+# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2.3
+# V3.3.2：智能掃描 2.0；A2.3：Strategy Lab 四策略PK＋門檻／持有期矩陣＋官方 API 穩定層，V4 再接 Fugle 即時行情
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -39,6 +39,51 @@ def load_stock_list():
 
 STOCK_LIST=load_stock_list()
 
+# ============================================================
+# 🌐 API 穩定層
+# Streamlit Cloud 偶爾會對 TWSE/TPEx 官方 OpenAPI 發生 SSL
+# 驗證錯誤。這裡採「正常 SSL 優先、SSL fallback、短重試」，
+# 並把實際錯誤摘要顯示給 UI，避免只看到「失敗」無法診斷。
+# ============================================================
+def fetch_json_api(url, timeout=20):
+    headers = {
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                     'AppleWebKit/537.36 (KHTML, like Gecko) '
+                     'Chrome/140.0 Safari/537.36',
+        'Accept':'application/json,text/plain,*/*',
+        'Referer':'https://www.tpex.org.tw/' if 'tpex.org.tw' in url else 'https://www.twse.com.tw/'
+    }
+    last_error=None
+
+    # 第一層：正常 SSL
+    for attempt in range(2):
+        try:
+            r=requests.get(url,timeout=timeout,headers=headers)
+            r.raise_for_status()
+            return r.json(), 'SSL正常'
+        except Exception as e:
+            last_error=e
+
+    # 第二層：部分雲端環境對 TPEx 憑證鏈驗證異常時，
+    # 允許以 verify=False 作為 fallback。資料仍來自官方 HTTPS API。
+    try:
+        r=requests.get(url,timeout=timeout,headers=headers,verify=False)
+        r.raise_for_status()
+        return r.json(), 'SSL fallback'
+    except Exception as e:
+        last_error=e
+
+    # 第三層：增加 query cache-buster，避免部分 proxy/cache 異常
+    try:
+        sep='&' if '?' in url else '?'
+        r=requests.get(url+sep+'_ts=1',timeout=timeout,headers=headers,verify=False)
+        r.raise_for_status()
+        return r.json(), 'SSL fallback+retry'
+    except Exception as e:
+        last_error=e
+
+    raise last_error
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_market_universe():
     """從 TWSE / TPEx 官方 OpenAPI 自動建立上市、上櫃、興櫃公司股票池。
@@ -53,9 +98,7 @@ def load_market_universe():
     source_status=[]
     for market,url in sources:
         try:
-            r=requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'})
-            r.raise_for_status()
-            data=r.json()
+            data, api_mode = fetch_json_api(url, timeout=20)
             if isinstance(data,dict):
                 data=data.get('data',data.get('results',[]))
             if not isinstance(data,list):
@@ -73,9 +116,10 @@ def load_market_universe():
                 name=str(name).strip()
                 if re.fullmatch(r'[0-9A-Z]{4,6}',code) and name:
                     rows.append({'股票代號':code,'股票名稱':name,'市場':market})
-            source_status.append(f'{market}：成功')
+            source_status.append(f'{market}：成功（{api_mode}）')
         except Exception as e:
-            source_status.append(f'{market}：失敗（{type(e).__name__}）')
+            msg=str(e).replace(chr(10),' ')[:100]
+            source_status.append(f'{market}：失敗（{type(e).__name__}） {msg}')
     d=pd.DataFrame(rows,columns=['股票代號','股票名稱','市場']).drop_duplicates('股票代號')
     if d.empty:
         d=STOCK_LIST.copy()
@@ -121,8 +165,7 @@ def load_market_snapshot():
             return np.nan
     for market,url in sources:
         try:
-            r=requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'})
-            r.raise_for_status(); data=r.json()
+            data, api_mode = fetch_json_api(url, timeout=20)
             if isinstance(data,dict): data=data.get('data',data.get('results',data.get('aaData',[])))
             if not isinstance(data,list): raise ValueError('API 回傳格式不是清單')
             count=0
@@ -140,9 +183,10 @@ def load_market_snapshot():
                     continue
                 all_rows.append({'股票代號':code,'股票名稱':name,'市場':market,'收盤價':close,'漲跌':change,'成交量':volume,'成交額':value,'最高價':high,'最低價':low})
                 count+=1
-            status.append(f'{market}：{count} 檔')
+            status.append(f'{market}：{count} 檔（{api_mode}）')
         except Exception as e:
-            status.append(f'{market}：失敗（{type(e).__name__}）')
+            msg=str(e).replace(chr(10),' ')[:100]
+            status.append(f'{market}：失敗（{type(e).__name__}） {msg}')
     d=pd.DataFrame(all_rows)
     if d.empty:
         return pd.DataFrame(columns=['股票代號','股票名稱','市場','收盤價','漲跌','成交量','成交額','最高價','最低價']), status
@@ -625,11 +669,15 @@ def collect_a2_history(symbols, market_map, progress=None):
     all_hist=[]
     n=max(len(symbols),1)
     for i,sym in enumerate(symbols):
-        df=get_stock_data(sym,market_map.get(sym))
-        if df is not None:
-            ev=historical_composite_events(df)
-            if not ev.empty:
-                ev['股票']=str(sym).zfill(4); all_hist.append(ev)
+        try:
+            df=get_stock_data(sym,market_map.get(sym))
+            if df is not None:
+                ev=historical_composite_events(df)
+                if not ev.empty:
+                    ev['股票']=str(sym).zfill(4); all_hist.append(ev)
+        except Exception:
+            # 單一股票資料異常不能拖垮整批 A2 健診
+            pass
         if progress is not None:
             if hasattr(progress, 'progress'):
                 progress.progress((i+1)/n)
@@ -764,8 +812,284 @@ def prepare_diag_history(history):
         h.loc[ix,'距MA15%']=close.div(ma15).sub(1).mul(100).values
     return h
 
+
+# ============================================================
+# 🧪 A2.3 Strategy Lab
+# 四策略公平 PK：
+#   1) MA20 + RSI
+#   2) MA15 + RSI
+#   3) MA20 + KD
+#   4) MA15 + KD
+#
+# 原則：
+# - 同一檔股票、同一段歷史、同一進出場規則
+# - 只改「快均線」與「動能指標」，其餘 A2 綜合分數邏輯盡量保持一致
+# - 訊號日收盤進場，N 個交易日後收盤出場
+# - 冷卻日以真正交易日序號計算
+# ============================================================
+
+A23_STRATEGIES = {
+    'MA20＋RSI': {'fast_ma':20, 'osc':'RSI'},
+    'MA15＋RSI': {'fast_ma':15, 'osc':'RSI'},
+    'MA20＋KD':  {'fast_ma':20, 'osc':'KD'},
+    'MA15＋KD':  {'fast_ma':15, 'osc':'KD'},
+}
+
+def indicators_strategy_lab(d, fast_ma=15, osc='KD'):
+    d=d.copy()
+    d['MA_FAST']=d.Close.rolling(int(fast_ma)).mean()
+    d['MA60']=d.Close.rolling(60).mean()
+    d['MA200']=d.Close.rolling(200).mean()
+    d['FAST_SLOPE']=d['MA_FAST']-d['MA_FAST'].shift(5)
+    d['MA60_SLOPE']=d['MA60']-d['MA60'].shift(5)
+    d['VOL_MA20']=d.Volume.rolling(20).mean()
+    d['VOL_RATIO']=d.Volume/d['VOL_MA20'].replace(0,np.nan)
+    d['CHANGE']=d.Close.pct_change()*100
+    d['HIGH20']=d.High.shift(1).rolling(20).max()
+
+    # RSI14（Wilder 類型 EWM）
+    delta=d.Close.diff()
+    gain=delta.clip(lower=0)
+    loss=(-delta.clip(upper=0))
+    avg_gain=gain.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    avg_loss=loss.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    rs=avg_gain/avg_loss.replace(0,np.nan)
+    d['RSI']=100-(100/(1+rs))
+    d.loc[(avg_loss==0)&(avg_gain>0),'RSI']=100
+    d.loc[(avg_loss==0)&(avg_gain==0),'RSI']=50
+
+    # KD：9日 RSV → K/D(3,3)
+    ll=d.Low.rolling(9).min()
+    hh=d.High.rolling(9).max()
+    d['RSV']=((d.Close-ll)/(hh-ll).replace(0,np.nan)*100).clip(0,100)
+    d['K']=d['RSV'].ewm(alpha=1/3,adjust=False,min_periods=1).mean()
+    d['D']=d['K'].ewm(alpha=1/3,adjust=False,min_periods=1).mean()
+    return d
+
+def momentum_score_strategy_lab(x, osc='KD'):
+    """A2.3 動能項目統一滿分 10。"""
+    if str(osc).upper()=='RSI':
+        r=float(x.RSI) if pd.notna(x.RSI) else 50.0
+        if 50<=r<=70: s=10.0
+        elif 45<=r<50: s=8.0
+        elif 70<r<=80: s=7.0
+        elif 35<=r<45: s=5.0
+        elif r>80: s=3.0
+        elif r<30: s=4.0
+        else: s=3.0
+        return _clip_score(s,0,10)
+
+    k=float(x.K) if pd.notna(x.K) else 50.0
+    d=float(x.D) if pd.notna(x.D) else 50.0
+    if k>=d:
+        if 45<=k<=75: s=10.0
+        elif 30<=k<45: s=8.0
+        elif 75<k<=85: s=7.0
+        elif k>85: s=3.0
+        else: s=6.0
+    else:
+        if k>=70: s=4.0
+        elif k>=50: s=5.0
+        elif k>=30: s=3.0
+        else: s=2.0
+    if k>d and k-d>=5: s=min(10.0,s+1.0)
+    return _clip_score(s,0,10)
+
+def strategy_lab_parts(hist, fast_ma=15, osc='KD'):
+    """同一套 A2 架構，只替換快均線與動能指標，確保四策略公平比較。"""
+    x=hist.iloc[-1]
+    close=float(x.Close)
+    vol=float(x.Volume) if pd.notna(x.Volume) else 0.0
+    fast=float(x.MA_FAST) if pd.notna(x.MA_FAST) else np.nan
+    ma60=float(x.MA60) if pd.notna(x.MA60) else np.nan
+    ma200=float(x.MA200) if pd.notna(x.MA200) else np.nan
+    vr=float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 1.0
+    chg=float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0
+
+    # 1) 智能 OHLCV 歷史代理（四策略完全相同）
+    turnover=close*vol
+    turn20=hist['Close'].mul(hist['Volume']).rolling(20).median().iloc[-1]
+    denom=turn20 if pd.notna(turn20) and turn20>0 else turnover
+    liq=15*_clip_score((turnover/(denom if denom>0 else 1))-0.5,0,2)/2
+
+    ret5=(close/float(hist['Close'].iloc[-6])-1)*100 if len(hist)>=6 and float(hist['Close'].iloc[-6])>0 else 0
+    mom=10*(_clip_score(chg,-5,5)+5)/10*0.55 + 10*(_clip_score(ret5,-10,10)+10)/20*0.45
+
+    amp=((float(x.High)-float(x.Low))/close*100) if close>0 and pd.notna(x.High) and pd.notna(x.Low) else 0
+    amp20=hist['Close'].pct_change().rolling(20).std().iloc[-1]*100
+    vol_score=5*(_clip_score(amp,0,10)/10*0.65 + _clip_score(amp20 if pd.notna(amp20) else 0,0,8)/8*0.35)
+    act=5*(_clip_score(vr,0,3)/3)
+
+    # 2) MA 結構：快均線依策略使用 MA15 或 MA20
+    ma=0
+    if pd.notna(fast) and close>fast: ma+=6
+    if pd.notna(ma60) and pd.notna(fast) and fast>ma60: ma+=4
+    if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: ma+=3
+    if pd.notna(x.FAST_SLOPE) and x.FAST_SLOPE>0: ma+=2
+    ma=min(ma,15)
+
+    # 3) MA200 生命線
+    life=0
+    if pd.notna(ma200):
+        dist=(close/ma200-1)*100
+        if 0<=dist<=5: life=10
+        elif dist>5: life=8
+        elif dist>=-3: life=6
+        elif dist>=-8: life=3
+
+    # 4) RSI 或 KD，統一滿分10
+    osc_score=momentum_score_strategy_lab(x,osc)
+
+    # 5) 量價
+    if vr>=1.2 and chg>0:q=10
+    elif vr>=1.0 and chg>0:q=8
+    elif vr>=1.2:q=6
+    elif chg>0:q=5
+    elif vr<0.7:q=2
+    else:q=3
+
+    # 6) 突破前20日高
+    prior_high=float(x.HIGH20) if pd.notna(x.HIGH20) else np.nan
+    if pd.notna(prior_high) and prior_high>0:
+        ratio=close/prior_high-1
+        br=10 if ratio>=0 else 7 if ratio>=-0.01 else 4 if ratio>=-0.03 else 1
+    else:
+        br=0
+
+    # 7) 策略品質：不用未來資料，以技術條件完整度計 0~10
+    confirmations=0
+    if pd.notna(fast) and close>fast: confirmations+=1
+    if pd.notna(ma60) and pd.notna(fast) and fast>ma60: confirmations+=1
+    if pd.notna(ma200) and close>ma200: confirmations+=1
+    if osc_score>=8: confirmations+=1
+    if vr>=1.2 and chg>0: confirmations+=1
+    if br>=7: confirmations+=1
+    strategy=min(10.0, confirmations*(10/6))
+
+    parts={
+        '智能流動性':liq,'智能動能':mom,'智能波動':vol_score,'智能活躍':act,
+        'MA多頭結構':ma,'生命線':life,'KD動能':osc_score,'量價確認':q,
+        '突破':br,'策略品質':strategy
+    }
+    return {k:round(_clip_score(v,0,COMPOSITE_WEIGHTS[k]),2) for k,v in parts.items()}
+
+def strategy_lab_history_for_stock(symbol, df, strategy_name):
+    cfg=A23_STRATEGIES[strategy_name]
+    if df is None or len(df)<220:return pd.DataFrame()
+    full=indicators_strategy_lab(df.copy(),cfg['fast_ma'],cfg['osc'])
+    rows=[]
+    for i in range(200,len(full)):
+        hist=full.iloc[:i+1]
+        x=hist.iloc[-1]
+        parts=strategy_lab_parts(hist,cfg['fast_ma'],cfg['osc'])
+        score=round(sum(parts.values()),2)
+        rows.append({
+            '股票':str(symbol).zfill(4),'日期':hist.index[-1],'策略':strategy_name,
+            '快均線':f"MA{cfg['fast_ma']}",'動能指標':cfg['osc'],
+            '綜合分數':score,'收盤':float(x.Close),
+            'RSI':float(x.RSI) if pd.notna(x.RSI) else np.nan,
+            'K':float(x.K) if pd.notna(x.K) else np.nan,
+            'D':float(x.D) if pd.notna(x.D) else np.nan,
+            '快均線值':float(x.MA_FAST) if pd.notna(x.MA_FAST) else np.nan,
+            **parts
+        })
+    return pd.DataFrame(rows)
+
+def collect_strategy_lab_history(symbols, market_map, progress=None, status=None):
+    all_rows=[]
+    total=max(len(symbols)*len(A23_STRATEGIES),1)
+    done=0
+    for sym in symbols:
+        try:
+            raw=get_stock_data(sym,market_map.get(sym))
+            if raw is None:
+                done+=len(A23_STRATEGIES)
+                continue
+            for strategy_name in A23_STRATEGIES:
+                if status is not None:
+                    status.text(f'A2.3 建立歷史：{sym} {stock_name(sym)}｜{strategy_name}')
+                h=strategy_lab_history_for_stock(sym,raw,strategy_name)
+                if not h.empty:all_rows.append(h)
+                done+=1
+                if progress is not None:
+                    val=min(done/total,1.0)
+                    if hasattr(progress,'progress'):progress.progress(val)
+                    elif callable(progress):progress(val)
+        except Exception:
+            done+=len(A23_STRATEGIES)
+            if progress is not None and hasattr(progress,'progress'):
+                progress.progress(min(done/total,1.0))
+            continue
+    return pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
+
+def add_forward_returns_a23(history, horizon):
+    if history is None or history.empty:return pd.DataFrame()
+    h=history.copy().sort_values(['策略','股票','日期']).reset_index(drop=True)
+    h['未來收盤']=h.groupby(['策略','股票'])['收盤'].shift(-int(horizon))
+    h['未來報酬%']=(h['未來收盤']/h['收盤']-1)*100
+    return h
+
+def select_a23(frame, min_score, min_gap):
+    if frame is None or frame.empty:return pd.DataFrame()
+    base=frame.sort_values(['策略','股票','日期']).copy()
+    base['_trade_pos']=base.groupby(['策略','股票']).cumcount()
+    x=base[base['綜合分數']>=float(min_score)].copy()
+    out=[]
+    for (strategy,sym),g in x.groupby(['策略','股票'],sort=False):
+        last=-10**9
+        for _,row in g.sort_values('日期').iterrows():
+            pos=int(row['_trade_pos'])
+            if pos-last<int(min_gap):continue
+            out.append(row)
+            last=pos
+    return pd.DataFrame(out).drop(columns=['_trade_pos'],errors='ignore') if out else pd.DataFrame()
+
+def strategy_lab_grid(history, thresholds, horizons, min_gap=3):
+    rows=[]
+    for hzn in horizons:
+        f=add_forward_returns_a23(history,hzn).dropna(subset=['未來報酬%'])
+        for strategy_name in A23_STRATEGIES:
+            sf=f[f['策略']==strategy_name]
+            for th in thresholds:
+                sel=select_a23(sf,th,min_gap)
+                metrics=_trade_metrics(sel['未來報酬%'] if not sel.empty else [])
+                rows.append({'策略':strategy_name,'最低分數':int(th),'持有交易日':int(hzn),**metrics})
+    return pd.DataFrame(rows)
+
+def strategy_lab_rank(grid, min_samples=20):
+    if grid is None or grid.empty:return pd.DataFrame()
+    x=grid.copy()
+    valid=x[(x['樣本數']>=int(min_samples)) & x['平均報酬%'].notna()].copy()
+    if valid.empty:return pd.DataFrame()
+
+    # 先以平均報酬排序，再看 PF、勝率；不製造黑箱加權分數。
+    valid=valid.sort_values(
+        ['平均報酬%','Profit Factor','勝率%','中位數報酬%','樣本數'],
+        ascending=[False,False,False,False,False]
+    ).reset_index(drop=True)
+    valid.insert(0,'排名',np.arange(1,len(valid)+1))
+    return valid
+
+def strategy_lab_summary(grid, min_samples=20):
+    if grid is None or grid.empty:return pd.DataFrame()
+    rows=[]
+    for strategy_name,g in grid.groupby('策略'):
+        valid=g[(g['樣本數']>=int(min_samples)) & g['平均報酬%'].notna()].copy()
+        if valid.empty:
+            rows.append({'策略':strategy_name,'最佳最低分數':np.nan,'最佳持有日':np.nan,'樣本數':0,
+                         '勝率%':np.nan,'平均報酬%':np.nan,'中位數報酬%':np.nan,'Profit Factor':np.nan,'最大回撤%':np.nan})
+            continue
+        best=valid.sort_values(['平均報酬%','Profit Factor','勝率%'],ascending=False).iloc[0]
+        rows.append({
+            '策略':strategy_name,'最佳最低分數':int(best['最低分數']),'最佳持有日':int(best['持有交易日']),
+            '樣本數':int(best['樣本數']),'勝率%':best['勝率%'],'平均報酬%':best['平均報酬%'],
+            '中位數報酬%':best['中位數報酬%'],'Profit Factor':best['Profit Factor'],'最大回撤%':best['最大回撤%']
+        })
+    return pd.DataFrame(rows).sort_values(['平均報酬%','Profit Factor'],ascending=False,na_position='last').reset_index(drop=True)
+
+
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋V3.2＋A2＋A2.1')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3 Strategy Lab')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新全市場股票池'):
@@ -803,7 +1127,7 @@ if scan_mode.startswith('🧠'):
 else:
     symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2｜智能掃描 2.0：官方行情初篩 → 分市場候選 → 黑嚕嚕技術精掃；行情仍為 yfinance 日資料。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3｜智能掃描 2.0＋A2.2 策略健診＋A2.3 Strategy Lab 四策略PK；行情仍為 yfinance 日資料。')
 a,b,c,d,e=st.columns(5);a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔');c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
 if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' in smart_pool.columns:
     with st.expander('🔎 查看 V3.3.2 智能候選池',expanded=False):
@@ -839,7 +1163,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　KD K {r['K']:.1f} / D {r['D']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6,t7,t8=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診'])
+t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab'])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -1020,4 +1344,127 @@ with t8:
         st.warning('研究性回測：目前股票池存在存活者偏差；歷史智能項目為OHLCV代理；未計手續費、交易稅、滑價與漲跌停。')
     else:st.info('尚未完成 A2.2。建議先用20～30檔測試，確認流程後再擴大。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.2.1｜策略健診＋MA15＋KD＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+
+with t9:
+    st.subheader('🧪 A2.3 Strategy Lab｜四策略公平 PK')
+    st.caption('同一批股票、同一段歷史、同一進出場規則，只比較「MA15 / MA20」與「RSI / KD」。目標是找出真正的甜蜜點，而不是假設最高分一定最好。')
+
+    st.markdown('### 🧬 本版比較的四套策略')
+    strategy_desc=pd.DataFrame([
+        {'策略':'MA20＋RSI','快均線':'MA20','動能':'RSI14','用途':'較慢趨勢＋傳統動能'},
+        {'策略':'MA15＋RSI','快均線':'MA15','動能':'RSI14','用途':'較快趨勢＋傳統動能'},
+        {'策略':'MA20＋KD','快均線':'MA20','動能':'9日KD','用途':'較慢趨勢＋KD轉折'},
+        {'策略':'MA15＋KD','快均線':'MA15','動能':'9日KD','用途':'目前 A2.2 基準'}
+    ])
+    st.dataframe(strategy_desc,use_container_width=True,hide_index=True)
+
+    a,b,c,d=st.columns(4)
+    with a:
+        a23_n=st.number_input('A2.3 股票數',min_value=5,max_value=min(300,len(symbols)),value=min(20,len(symbols)),step=5,key='a23_n')
+    with b:
+        a23_gap=st.selectbox('冷卻交易日',[0,3,5,10,20],index=1,key='a23_gap')
+    with c:
+        a23_min_samples=st.number_input('最低有效樣本數',min_value=5,max_value=500,value=20,step=5,key='a23_min_samples')
+    with d:
+        st.metric('策略組合','4 套')
+
+    a23_thresholds=st.multiselect('要比較的最低分數',[50,55,60,65,70,75,80,85,90],default=[65,70,75,80,85,90],key='a23_thresholds')
+    a23_horizons=st.multiselect('要比較的持有交易日',[1,3,5,10,20],default=[3,5,10,20],key='a23_horizons')
+
+    total_cases=max(len(a23_thresholds),1)*max(len(a23_horizons),1)*len(A23_STRATEGIES)
+    st.info(f'本次最多比較 {total_cases} 組條件。建議先用 20～30 檔確認流程，再逐步擴大股票數。')
+
+    if st.button('▶ 執行 A2.3 四策略 PK',type='primary',key='run_a23'):
+        if not a23_thresholds or not a23_horizons:
+            st.warning('最低分數與持有交易日都至少要選一個。')
+        else:
+            p=st.progress(0);status23=st.empty()
+            hist23=collect_strategy_lab_history(symbols[:int(a23_n)],market_map,p,status23)
+            p.empty();status23.empty()
+            if hist23.empty:
+                st.session_state['a23_hist']=pd.DataFrame()
+                st.session_state['a23_grid']=pd.DataFrame()
+            else:
+                grid23=strategy_lab_grid(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+                st.session_state['a23_hist']=hist23
+                st.session_state['a23_grid']=grid23
+                st.session_state['a23_settings']={
+                    '股票數':int(a23_n),'冷卻':int(a23_gap),
+                    '門檻':list(a23_thresholds),'持有日':list(a23_horizons)
+                }
+
+    grid23=st.session_state.get('a23_grid',pd.DataFrame())
+    hist23=st.session_state.get('a23_hist',pd.DataFrame())
+
+    if not grid23.empty:
+        fmt23={'勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
+               '報酬加總%':'{:+.2f}%','Profit Factor':'{:.2f}','Expectancy%':'{:+.2f}%',
+               '最大回撤%':'{:+.2f}%','平均獲利%':'{:+.2f}%','平均虧損%':'{:+.2f}%'}
+
+        st.markdown('### 🏆 ① 四策略最佳組合')
+        sm23=strategy_lab_summary(grid23,int(a23_min_samples))
+        if sm23.empty or sm23['平均報酬%'].notna().sum()==0:
+            st.warning('目前沒有任何組合達到最低有效樣本數。可降低「最低有效樣本數」或增加回測股票數。')
+        else:
+            st.dataframe(sm23.style.format({
+                '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
+                'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+            }),use_container_width=True,hide_index=True)
+            winner=sm23.dropna(subset=['平均報酬%']).iloc[0]
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric('目前冠軍',winner['策略'])
+            c2.metric('最佳最低分數',f"≥{int(winner['最佳最低分數'])} 分")
+            c3.metric('最佳持有期',f"{int(winner['最佳持有日'])} 日")
+            c4.metric('平均報酬',f"{winner['平均報酬%']:+.2f}%",f"PF {winner['Profit Factor']:.2f}")
+
+        st.markdown('### 🥇 ② 全條件排行榜')
+        rank23=strategy_lab_rank(grid23,int(a23_min_samples))
+        if rank23.empty:
+            st.info('沒有達到最低樣本數的有效組合。')
+        else:
+            cols23=['排名','策略','最低分數','持有交易日','樣本數','勝率%','平均報酬%','中位數報酬%','Profit Factor','最大回撤%','平均獲利%','平均虧損%']
+            st.dataframe(rank23[cols23].head(30).style.format(fmt23),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🗺️ ③ 策略 × 分數 × 持有期矩陣')
+        metric23=st.selectbox('矩陣顯示指標',['平均報酬%','勝率%','Profit Factor','最大回撤%','樣本數'],index=0,key='a23_metric')
+        strategy23=st.selectbox('查看策略',list(A23_STRATEGIES.keys()),index=3,key='a23_strategy_view')
+        sub23=grid23[grid23['策略']==strategy23]
+        if not sub23.empty:
+            pv23=sub23.pivot(index='最低分數',columns='持有交易日',values=metric23)
+            if metric23 in ['平均報酬%','最大回撤%']:
+                st.dataframe(pv23.style.format('{:+.2f}%'),use_container_width=True)
+            elif metric23=='勝率%':
+                st.dataframe(pv23.style.format('{:.1f}%'),use_container_width=True)
+            elif metric23=='Profit Factor':
+                st.dataframe(pv23.style.format('{:.2f}'),use_container_width=True)
+            else:
+                st.dataframe(pv23.style.format('{:.0f}'),use_container_width=True)
+
+        st.markdown('### 📊 ④ 四策略在相同條件下直接 PK')
+        q1,q2=st.columns(2)
+        with q1:
+            common_th=st.selectbox('固定最低分數',sorted(grid23['最低分數'].unique().tolist()),index=0,key='a23_common_th')
+        with q2:
+            common_h=st.selectbox('固定持有日',sorted(grid23['持有交易日'].unique().tolist()),index=0,key='a23_common_h')
+        direct=grid23[(grid23['最低分數']==common_th)&(grid23['持有交易日']==common_h)].copy()
+        direct=direct.sort_values(['平均報酬%','Profit Factor'],ascending=False)
+        st.dataframe(direct[['策略','樣本數','勝率%','平均報酬%','中位數報酬%','Profit Factor','最大回撤%']].style.format(fmt23),use_container_width=True,hide_index=True)
+        if not direct.empty:
+            st.bar_chart(direct.set_index('策略')['平均報酬%'])
+
+        st.markdown('### 🔬 ⑤ 研究結論提醒')
+        st.write('A2.3 的目的不是只挑「平均報酬最高」；你要同時看樣本數、Profit Factor、最大回撤與勝率。若冠軍只靠很少樣本，先視為候選，不直接定版。')
+        st.warning('A2.3 仍屬研究性回測：目前股票池存在存活者偏差；智能四項是 OHLCV 歷史代理；未計手續費、交易稅、滑價、漲跌停與實際資金部位。下一階段應做 A2.4 走勢外樣本／投資組合回測。')
+
+        st.download_button('⬇️ 匯出 A2.3 全策略比較 CSV',
+                           grid23.to_csv(index=False).encode('utf-8-sig'),
+                           'A2.3_strategy_lab_grid.csv','text/csv',key='a23_dl_grid')
+        if not hist23.empty:
+            st.download_button('⬇️ 匯出 A2.3 歷史分數明細 CSV',
+                               hist23.to_csv(index=False).encode('utf-8-sig'),
+                               'A2.3_strategy_lab_history.csv','text/csv',key='a23_dl_hist')
+    else:
+        st.info('尚未完成 A2.3。按「▶ 執行 A2.3 四策略 PK」開始比較。')
+
+
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3｜Strategy Lab 四策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
