@@ -863,6 +863,10 @@ A23_STRATEGIES = {
     'MA60＋KD':  {'fast_ma':60, 'osc':'KD'},
 }
 
+A23_STRATEGY_SIGNATURE = '|'.join(
+    f"{name}:{cfg['fast_ma']}:{cfg['osc']}" for name,cfg in A23_STRATEGIES.items()
+)
+
 def indicators_strategy_lab(d, fast_ma=15, osc='KD'):
     d=d.copy()
     d['MA_FAST']=d.Close.rolling(int(fast_ma)).mean()
@@ -1118,7 +1122,7 @@ def strategy_lab_summary(grid, min_samples=20):
 
 
 # ============================================================
-# 🧪 A2.3.3 Strategy Lab Pro
+# 🧪 A2.3.4 Strategy Lab Pro
 # 新增：
 # 1) 95% 平均報酬信賴區間（常態近似）
 # 2) 穩健候選：樣本數達標且 95% CI 下限 > 0
@@ -1262,7 +1266,7 @@ def strategy_lab_band_summary(band_grid, min_samples=20):
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.3 Strategy Lab Pro')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.4 Strategy Lab Pro')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新全市場股票池'):
@@ -1519,7 +1523,7 @@ with t8:
 
 
 with t9:
-    st.subheader('🧪 A2.3.3 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
+    st.subheader('🧪 A2.3.4 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
     st.caption('同一批股票、同一段歷史、同一進出場規則，只比較「MA15 / MA20」與「RSI / KD」。目標是找出真正的甜蜜點，而不是假設最高分一定最好。')
 
     st.markdown('### 🧬 本版比較的八套策略')
@@ -1552,7 +1556,7 @@ with t9:
     total_cases=max(len(a23_thresholds),1)*max(len(a23_horizons),1)*len(A23_STRATEGIES)
     st.info(f'本次最多比較 {total_cases} 組條件。建議先用 20～30 檔確認流程，再逐步擴大股票數。')
 
-    if st.button('▶ 執行 A2.3 四策略 PK',type='primary',key='run_a23'):
+    if st.button('▶ 執行 A2.3 八策略 PK',type='primary',key='run_a23'):
         if not a23_thresholds or not a23_horizons:
             st.warning('最低分數與持有交易日都至少要選一個。')
         else:
@@ -1563,6 +1567,7 @@ with t9:
                 st.session_state['a23_hist']=pd.DataFrame()
                 st.session_state['a23_grid']=pd.DataFrame()
                 st.session_state['a23_band_grid']=pd.DataFrame()
+                st.session_state['a23_strategy_signature']=A23_STRATEGY_SIGNATURE
             else:
                 grid23=strategy_lab_grid_pro(hist23,a23_thresholds,a23_horizons,int(a23_gap))
                 band23=strategy_lab_band_grid(hist23,a23_horizons,int(a23_gap))
@@ -1573,6 +1578,14 @@ with t9:
                     '股票數':int(a23_n),'冷卻':int(a23_gap),
                     '門檻':list(a23_thresholds),'持有日':list(a23_horizons)
                 }
+                st.session_state['a23_strategy_signature']=A23_STRATEGY_SIGNATURE
+
+    # A2.3.4：避免 Streamlit 沿用舊版四策略 session_state。
+    # 若策略集合有變更，就自動清除舊 A2.3 回測結果，要求重新執行。
+    saved_sig=st.session_state.get('a23_strategy_signature')
+    if saved_sig is not None and saved_sig != A23_STRATEGY_SIGNATURE:
+        for _k in ['a23_hist','a23_grid','a23_band_grid','a23_settings']:
+            st.session_state.pop(_k,None)
 
     grid23=st.session_state.get('a23_grid',pd.DataFrame())
     hist23=st.session_state.get('a23_hist',pd.DataFrame())
@@ -1718,7 +1731,7 @@ with t9:
                                band23.to_csv(index=False).encode('utf-8-sig'),
                                'A2.3.3_score_band_analysis.csv','text/csv',key='a232_dl_band')
     else:
-        st.info('尚未完成 A2.3。按「▶ 執行 A2.3 四策略 PK」開始比較。')
+        st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.3｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
