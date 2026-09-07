@@ -630,7 +630,11 @@ def collect_a2_history(symbols, market_map, progress=None):
             ev=historical_composite_events(df)
             if not ev.empty:
                 ev['股票']=str(sym).zfill(4); all_hist.append(ev)
-        if progress is not None:progress((i+1)/n)
+        if progress is not None:
+            if hasattr(progress, 'progress'):
+                progress.progress((i+1)/n)
+            elif callable(progress):
+                progress((i+1)/n)
     return pd.concat(all_hist,ignore_index=True) if all_hist else pd.DataFrame()
 
 def _weight_variants(base):
@@ -1016,4 +1020,4 @@ with t8:
         st.warning('研究性回測：目前股票池存在存活者偏差；歷史智能項目為OHLCV代理；未計手續費、交易稅、滑價與漲跌停。')
     else:st.info('尚未完成 A2.2。建議先用20～30檔測試，確認流程後再擴大。')
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.2｜策略健診＋MA15＋KD＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.2.1｜策略健診＋MA15＋KD＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
