@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.3.2 A2.3.2
-# V3.3.2：智能掃描 2.0；A2.3：Strategy Lab 八策略PK＋門檻／持有期矩陣＋官方 API 穩定層，V4 再接 Fugle 即時行情
+# 🖤 黑嚕嚕－台股盤中雷達 V3.4.0
+# V3.4.0：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -45,6 +45,176 @@ def universe_effective_key(dt=None):
     dt=dt or taiwan_now()
     effective=dt.date() if dt.hour>=18 else (dt-timedelta(days=1)).date()
     return effective.isoformat()
+
+
+# ============================================================
+# ⚡ V3.4.0 Fugle 即時行情層
+# Fugle 官方文件：
+#   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
+# API Key 建議放在 Streamlit Secrets：
+#   FUGLE_API_KEY = "..."
+# 若未設定或方案不支援 snapshot，系統自動退回官方日行情 / Yahoo 日K。
+# ============================================================
+
+def get_secret_value(name, default=''):
+    try:
+        return str(st.secrets[name]).strip()
+    except Exception:
+        return default
+
+def epoch_to_taiwan_text(v):
+    try:
+        x=float(v)
+        if x<=0:return ''
+        # Fugle 範例為 microseconds；同時相容 milliseconds / seconds
+        if x>1e14:
+            dt=pd.to_datetime(int(x),unit='us',utc=True)
+        elif x>1e11:
+            dt=pd.to_datetime(int(x),unit='ms',utc=True)
+        else:
+            dt=pd.to_datetime(x,unit='s',utc=True)
+        return dt.tz_convert(TAIWAN_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+def quote_age_seconds(time_text, now=None):
+    if not time_text:return np.nan
+    try:
+        now=now or taiwan_now()
+        dt=datetime.strptime(time_text,'%Y-%m-%d %H:%M:%S').replace(tzinfo=TAIWAN_TZ)
+        return max(0.0,(now-dt).total_seconds())
+    except Exception:
+        return np.nan
+
+def quote_freshness_label(time_text, source=''):
+    if not time_text:
+        return '⚪ 無時間'
+    age=quote_age_seconds(time_text)
+    if source.startswith('Fugle'):
+        if pd.notna(age) and age<=90:return '🟢 即時'
+        if pd.notna(age) and age<=600:return '🟡 稍延遲'
+        return '🟠 舊快照'
+    return '⚪ 日行情'
+
+@st.cache_data(ttl=10, show_spinner=False)
+def load_fugle_snapshot(markets_tuple, _api_key=''):
+    """以市場別一次抓整批 Fugle 快照，避免逐檔打 API。"""
+    cols=['股票代號','股票名稱','市場','收盤價','漲跌','漲跌幅%','成交量',
+          '成交額','開盤價','最高價','最低價','報價日期','報價時間','行情來源']
+    if not _api_key:
+        return pd.DataFrame(columns=cols), ['Fugle：未設定 API Key'], ''
+
+    market_code={'上市':'TSE','上櫃':'OTC','興櫃':'ESB'}
+    rows=[];status=[];latest_time=''
+    headers={'X-API-KEY':_api_key,'Accept':'application/json'}
+    for market in markets_tuple:
+        code=market_code.get(market)
+        if not code:continue
+        url=f'https://api.fugle.tw/marketdata/v1.0/stock/snapshot/quotes/{code}'
+        try:
+            r=requests.get(url,headers=headers,params={'type':'COMMONSTOCK'},timeout=15)
+            if r.status_code in (401,403):
+                raise RuntimeError(f'HTTP {r.status_code}：API Key 或方案無 snapshot 權限')
+            r.raise_for_status()
+            payload=r.json()
+            data=payload.get('data',[]) if isinstance(payload,dict) else []
+            pdate=str(payload.get('date','')) if isinstance(payload,dict) else ''
+            ptime=str(payload.get('time','')) if isinstance(payload,dict) else ''
+            n=0
+            for item in data:
+                if not isinstance(item,dict):continue
+                sym=str(item.get('symbol','')).strip()
+                if not re.fullmatch(r'\d{4,6}',sym):continue
+                close=pd.to_numeric(item.get('closePrice'),errors='coerce')
+                if pd.isna(close) or float(close)<=0:continue
+                # Fugle tradeVolume 以台股成交量常用「張」表示；轉成股數與 yfinance 對齊
+                vol_raw=pd.to_numeric(item.get('tradeVolume'),errors='coerce')
+                vol_shares=float(vol_raw)*1000 if pd.notna(vol_raw) else np.nan
+                last_text=epoch_to_taiwan_text(item.get('lastUpdated'))
+                if last_text and (not latest_time or last_text>latest_time):
+                    latest_time=last_text
+                rows.append({
+                    '股票代號':sym.zfill(4),'股票名稱':str(item.get('name','')).strip(),'市場':market,
+                    '收盤價':float(close),
+                    '漲跌':pd.to_numeric(item.get('change'),errors='coerce'),
+                    '漲跌幅%':pd.to_numeric(item.get('changePercent'),errors='coerce'),
+                    '成交量':vol_shares,
+                    '成交額':pd.to_numeric(item.get('tradeValue'),errors='coerce'),
+                    '開盤價':pd.to_numeric(item.get('openPrice'),errors='coerce'),
+                    '最高價':pd.to_numeric(item.get('highPrice'),errors='coerce'),
+                    '最低價':pd.to_numeric(item.get('lowPrice'),errors='coerce'),
+                    '報價日期':pdate,
+                    '報價時間':last_text or (f'{pdate} {ptime[:2]}:{ptime[2:4]}:{ptime[4:6]}' if len(ptime)>=6 else ''),
+                    '行情來源':'Fugle 5秒快照'
+                })
+                n+=1
+            status.append(f'Fugle {market}：{n} 檔')
+        except Exception as e:
+            status.append(f'Fugle {market}：失敗（{str(e)[:90]}）')
+    d=pd.DataFrame(rows,columns=cols)
+    if not d.empty:
+        d=d.drop_duplicates(['股票代號','市場'],keep='last')
+    return d,status,latest_time or taiwan_time_text()
+
+def combine_quote_snapshots(fugle_df, official_df):
+    """Fugle 優先；缺漏股票再由官方日行情補足。"""
+    frames=[]
+    if fugle_df is not None and not fugle_df.empty:
+        f=fugle_df.copy()
+        frames.append(f)
+    if official_df is not None and not official_df.empty:
+        o=official_df.copy()
+        if '行情來源' not in o.columns:o['行情來源']='官方日行情'
+        if '報價日期' not in o.columns:o['報價日期']=''
+        if '報價時間' not in o.columns:o['報價時間']=''
+        if '開盤價' not in o.columns:o['開盤價']=np.nan
+        frames.append(o)
+    if not frames:return pd.DataFrame()
+    d=pd.concat(frames,ignore_index=True,sort=False)
+    # Fugle 先 append，所以 keep first
+    return d.drop_duplicates(['股票代號','市場'],keep='first').reset_index(drop=True)
+
+def inject_live_daily_bar(df, quote_row):
+    """
+    把 Fugle 今日 OHLCV 當成「未完成日K」暫時注入 2 年歷史，
+    讓 MA / KD / RSI / 突破 / 量比在盤中跟著目前行情重算。
+    不修改原始 Yahoo 歷史資料。
+    """
+    if df is None or quote_row is None:return df,False
+    if str(quote_row.get('行情來源',''))!='Fugle 5秒快照':
+        return df,False
+    try:
+        qdate=str(quote_row.get('報價日期','')).strip()
+        if not qdate:return df,False
+        dt=pd.Timestamp(qdate)
+        close=pd.to_numeric(quote_row.get('收盤價'),errors='coerce')
+        op=pd.to_numeric(quote_row.get('開盤價'),errors='coerce')
+        hi=pd.to_numeric(quote_row.get('最高價'),errors='coerce')
+        lo=pd.to_numeric(quote_row.get('最低價'),errors='coerce')
+        vol=pd.to_numeric(quote_row.get('成交量'),errors='coerce')
+        if pd.isna(close) or close<=0:return df,False
+
+        out=df.copy()
+        # 未提供 OHLC 時以目前價補齊，避免產生 NaN 技術指標
+        op=float(op) if pd.notna(op) and op>0 else float(close)
+        hi=float(hi) if pd.notna(hi) and hi>0 else max(op,float(close))
+        lo=float(lo) if pd.notna(lo) and lo>0 else min(op,float(close))
+        vol=float(vol) if pd.notna(vol) and vol>=0 else 0.0
+        row=pd.DataFrame({'Open':[op],'High':[hi],'Low':[lo],'Close':[float(close)],'Volume':[vol]},index=[dt])
+
+        # 同一天已存在 yfinance 未完成bar就覆蓋，否則 append
+        same=[x for x in out.index if pd.Timestamp(x).normalize()==dt.normalize()]
+        if same:
+            out.loc[same[-1],['Open','High','Low','Close','Volume']]=[op,hi,lo,float(close),vol]
+        else:
+            out=pd.concat([out,row])
+        out=out[~out.index.duplicated(keep='last')].sort_index()
+        out.attrs.update(df.attrs)
+        out.attrs['live_bar']='Fugle'
+        out.attrs['live_quote_time']=str(quote_row.get('報價時間',''))
+        return out,True
+    except Exception:
+        return df,False
 
 DEFAULT_STOCKS='''1101,1102,1216,1301,1303,1402,1476,1597,2002,2301,2303,2308,2317,2330,2345,2353,2356,2359,2368,2376,2382,2395,2408,2454,2455,2603,2609,2615,3006,3034,3037,3044,3231,3260,3443,3455,3661,3711,4763,4966,5274,5483,6125,6147,6182,6239,6271,6409,6669,8046,8299'''
 
@@ -372,12 +542,16 @@ def signals(d,score):
 
 def build_row(symbol,df,quote_row=None,quote_fetch_time=None):
     if df is None or len(df)<200:return None
-    d=indicators(df);x=d.iloc[-1];score,bd,reasons=black_score(d);sig=signals(d,score)
+
+    calc_df,live_used=inject_live_daily_bar(df,quote_row)
+    d=indicators(calc_df);x=d.iloc[-1];score,bd,reasons=black_score(d);sig=signals(d,score)
 
     price=float(x.Close)
     change=float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0
     display_volume=float(x.Volume)
     price_source='Yahoo Finance 日K'
+    quote_time=df.attrs.get('fetch_time_tw','')
+    quote_date=''
     quote_used=False
 
     if quote_row is not None:
@@ -385,12 +559,20 @@ def build_row(symbol,df,quote_row=None,quote_fetch_time=None):
             qprice=pd.to_numeric(quote_row.get('收盤價',np.nan),errors='coerce')
             qchg=pd.to_numeric(quote_row.get('漲跌幅%',np.nan),errors='coerce')
             qvol=pd.to_numeric(quote_row.get('成交量',np.nan),errors='coerce')
+            qsource=str(quote_row.get('行情來源','官方日行情'))
+            qtime=str(quote_row.get('報價時間','') or quote_fetch_time or '')
+            qdate=str(quote_row.get('報價日期','') or '')
             if pd.notna(qprice) and float(qprice)>0:
-                price=float(qprice);price_source='官方市場快照';quote_used=True
+                price=float(qprice);price_source=qsource;quote_used=True
             if pd.notna(qchg):change=float(qchg)
             if pd.notna(qvol) and float(qvol)>=0:display_volume=float(qvol)
+            if qtime:quote_time=qtime
+            quote_date=qdate
         except Exception:
             pass
+
+    freshness=quote_freshness_label(quote_time,price_source)
+    tech_state='⚡ Fugle 盤中未完成日K' if live_used else '📅 完整日K'
 
     return {
         '股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'市場':stock_market(symbol),
@@ -404,8 +586,8 @@ def build_row(symbol,df,quote_row=None,quote_fetch_time=None):
         '判斷':'、'.join(dict.fromkeys(reasons[:8])),'趨勢分':bd['趨勢'],'動能分':bd['動能'],
         '量能分':bd['成交量'],'突破分':bd['突破'],'KD分':bd['KD'],'額外分':bd['額外強度'],
         '技術資料日':pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d'),
-        '價格來源':price_source,
-        '行情抓取時間':quote_fetch_time if quote_used and quote_fetch_time else df.attrs.get('fetch_time_tw',''),
+        '價格來源':price_source,'行情狀態':freshness,'行情時間':quote_time,
+        '技術狀態':tech_state,'報價日期':quote_date,
         '_df':d
     }
 
@@ -1564,12 +1746,20 @@ def run_a235_portfolio(history, strategy_name, min_score, horizon,
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.6 Strategy Lab Pro')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.0｜Fugle Hybrid Realtime＋A2.3.5 Strategy Lab Pro')
+FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
+fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
+FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
+if FUGLE_API_KEY:
+    st.sidebar.success('⚡ Fugle Key 已載入')
+else:
+    st.sidebar.info('⚪ Fugle 尚未設定，使用官方日行情 / Yahoo 日K備援')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
 if st.sidebar.button('🔄 更新股票池與行情'):
     load_market_universe.clear()
     load_market_snapshot.clear()
+    load_fugle_snapshot.clear()
     get_stock_data.clear()
     st.rerun()
 counts=UNIVERSE['市場'].value_counts().to_dict() if not UNIVERSE.empty else {}
@@ -1595,9 +1785,14 @@ market_map=dict(zip(UNIVERSE['股票代號'],UNIVERSE['市場'])) if not UNIVERS
 if not STOCK_LIST.empty and '股票代號' in STOCK_LIST.columns and '市場' in STOCK_LIST.columns:
     market_map.update(dict(zip(STOCK_LIST['股票代號'].astype(str).str.zfill(4),STOCK_LIST['市場'])))
 symbols=[x for x in symbols if not markets or market_map.get(x,'未分類') in markets]
-smart_snapshot=pd.DataFrame();smart_status=[];smart_note='';SMART_SNAPSHOT_FETCH_TIME='未抓取'
+official_snapshot,official_status,OFFICIAL_SNAPSHOT_FETCH_TIME=load_market_snapshot()
+fugle_snapshot,fugle_status,FUGLE_SNAPSHOT_FETCH_TIME=load_fugle_snapshot(tuple(markets),FUGLE_API_KEY)
+smart_snapshot=combine_quote_snapshots(fugle_snapshot,official_snapshot)
+smart_status=(fugle_status if FUGLE_API_KEY else [])+official_status
+smart_note=''
+SMART_SNAPSHOT_FETCH_TIME=FUGLE_SNAPSHOT_FETCH_TIME if (fugle_snapshot is not None and not fugle_snapshot.empty) else OFFICIAL_SNAPSHOT_FETCH_TIME
+
 if scan_mode.startswith('🧠'):
-    smart_snapshot,smart_status,SMART_SNAPSHOT_FETCH_TIME=load_market_snapshot()
     base_universe=UNIVERSE[UNIVERSE['市場'].isin(markets)].copy() if not UNIVERSE.empty else pd.DataFrame()
     smart_pool,smart_note=smart_rank_universe(base_universe,smart_snapshot,markets,max_n,smart_min_volume,smart_min_value,smart_min_change)
     symbols=smart_pool['股票代號'].astype(str).str.zfill(4).tolist()
@@ -1607,10 +1802,10 @@ else:
 
 quote_map={}
 if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in smart_snapshot.columns:
-    for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='last').iterrows():
+    for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3.6｜台灣時間＋資料新鮮度檢查＋A2.3.5 Reliability / Portfolio；技術指標仍以 Yahoo Finance 日K 為基礎。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.0｜Fugle 5秒行情快照＋盤中未完成日K即時計算＋Yahoo 2年歷史日K＋官方日行情備援＋A2.3.5 Reliability / Portfolio。')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
 a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔')
@@ -1618,13 +1813,19 @@ c.metric('最低量比',f'{min_vr:.1f}x');d.metric('台股狀態',_session);e.me
 with st.expander('🕒 資料更新時間與價格來源',expanded=True):
     st.write(f"**台灣時間：** {taiwan_time_text(_now_tw)}")
     st.write(f"**股票池最近同步：** {UNIVERSE_FETCH_TIME}（台灣時間）")
-    st.write(f"**官方行情快照抓取：** {SMART_SNAPSHOT_FETCH_TIME if scan_mode.startswith('🧠') else '指定股票池模式未抓取'}")
-    st.write("**股票池更新規則：** 每日台灣時間 18:00 後，當天第一次重新執行會自動抓官方上市／上櫃／興櫃基本資料；也可按側邊欄「更新股票池與行情」立即重抓。")
-    st.write("**價格邏輯：** 技術指標使用 Yahoo Finance 日K；全市場智能掃描若成功取得官方市場快照，排行榜顯示價格優先使用官方快照。")
-    if _session=='盤中':
-        st.warning('目前為台股盤中。Yahoo Finance 1日K不保證是即時成交價，因此技術分數屬日K雷達，不是逐筆即時報價。')
+    st.write(f"**Fugle 快照時間：** {FUGLE_SNAPSHOT_FETCH_TIME if (fugle_snapshot is not None and not fugle_snapshot.empty) else '未連線／無權限'}")
+    st.write(f"**官方備援行情抓取：** {OFFICIAL_SNAPSHOT_FETCH_TIME}")
+    st.write("**股票池更新規則：** 每日台灣時間 18:00 後首次執行自動同步；也可按側邊欄「更新股票池與行情」。")
+    if fugle_snapshot is not None and not fugle_snapshot.empty:
+        st.success('⚡ Fugle 即時行情已啟用：排行榜使用 Fugle 價格，並把今日 OHLCV 當成未完成日K注入技術計算。')
+    elif FUGLE_API_KEY:
+        st.warning('Fugle API Key 已載入，但 snapshot 未成功。可能是方案沒有 Snapshot Quotes 權限；目前自動使用官方日行情 / Yahoo 日K。')
     else:
-        st.info('目前非一般交易時段。若是凌晨或開盤前，看到上一個交易日價格是正常的；下一個交易日尚未開盤，不會有新的日K收盤價。')
+        st.info('尚未設定 Fugle API Key。目前仍會正常運作，但盤中價格可能落後；正式盤中雷達建議設定 Fugle。')
+    if _session=='盤中' and (fugle_snapshot is None or fugle_snapshot.empty):
+        st.warning('目前為盤中，但即時行情層未啟用：技術分數主要依完整日K，請勿把排行榜價格視為即時成交價。')
+    elif _session!='盤中':
+        st.info('目前非一般盤中時段；收盤後 Fugle 快照可用於確認當日最終行情，歷史回測仍以完整日K為準。')
 st.divider()
 if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' in smart_pool.columns:
     with st.expander('🔎 查看 V3.3.2 智能候選池',expanded=False):
@@ -1635,8 +1836,22 @@ if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' i
         preview['成交額']=preview['成交額'].map(lambda x:f'{x:,.0f}')
         st.dataframe(preview,use_container_width=True,hide_index=True)
 if scan_mode.startswith('🧠'):
-    st.info(f'🧠 智能掃描：先從上市／上櫃／興櫃官方行情篩選，再對 {len(symbols)} 檔進行 2 年技術分析。{smart_note}')
+    _prefilter_source='Fugle 即時快照' if (fugle_snapshot is not None and not fugle_snapshot.empty) else '官方日行情'
+    st.info(f'🧠 智能掃描：先用 {_prefilter_source} 篩選，再對 {len(symbols)} 檔進行 2 年歷史＋今日即時技術分析。{smart_note}')
     if smart_status: st.caption('｜'.join(smart_status))
+
+with st.expander('⚡ V3.4 即時行情診斷',expanded=False):
+    st.write(f"**Fugle Key：** {'已載入' if FUGLE_API_KEY else '未設定'}")
+    st.write(f"**Fugle 快照筆數：** {0 if fugle_snapshot is None else len(fugle_snapshot):,}")
+    st.write(f"**官方備援筆數：** {0 if official_snapshot is None else len(official_snapshot):,}")
+    if fugle_status: st.write('**Fugle 狀態：** '+'｜'.join(fugle_status))
+    if official_status: st.write('**官方狀態：** '+'｜'.join(official_status))
+    test_code='3167'
+    if test_code in quote_map:
+        q=quote_map[test_code]
+        st.write(f"**大量 3167 測試：** {q.get('收盤價','—')}｜{q.get('行情來源','—')}｜{q.get('報價時間','—')}")
+    else:
+        st.write('**大量 3167 測試：** 本次快照未包含 3167')
 
 rows=[];p=st.progress(0);status=st.empty()
 for i,s in enumerate(symbols):
@@ -1654,8 +1869,13 @@ result=pd.DataFrame(rows);result=add_composite_columns(result);sort_col={'黑嚕
 if '技術資料日' in result.columns and not result.empty:
     _dates=sorted(result['技術資料日'].dropna().astype(str).unique().tolist())
     _latest='、'.join(_dates[-3:]) if _dates else '未知'
-    _src='官方市場快照優先' if (result['價格來源']=='官方市場快照').any() else 'Yahoo Finance 日K'
-    st.caption(f"📅 技術日K最新資料日：{_latest}｜畫面價格來源：{_src}")
+    if (result['價格來源']=='Fugle 5秒快照').any():
+        _src='⚡ Fugle 5秒快照＋盤中未完成日K'
+    elif (result['價格來源']=='官方日行情').any():
+        _src='官方日行情'
+    else:
+        _src='Yahoo Finance 日K'
+    st.caption(f"📅 技術最新資料日：{_latest}｜行情來源：{_src}")
 
 strong=int((result['黑嚕嚕分數']>=80).sum());breakout=int(result['訊號'].str.contains('🚀 強勢突破',regex=False).sum());risk=int(result['訊號'].str.contains('⚠️ 爆量高危',regex=False).sum());weak=int(result['訊號'].str.contains('🔴 趨勢轉弱',regex=False).sum())
 a,b,c,d,e=st.columns(5);a.metric('符合條件',f'{len(result)} 檔');b.metric('🔥 80分以上',f'{strong} 檔');c.metric('🚀 突破',f'{breakout} 檔');d.metric('⚠️ 高危',f'{risk} 檔');e.metric('🔴 轉弱',f'{weak} 檔');st.divider()
@@ -1667,7 +1887,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
 
 t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab'])
 with t1:
-    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','技術資料日','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
+    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
 with t2:
     st.subheader('🚨 黑嚕嚕訊號中心')
@@ -2174,4 +2394,4 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.6｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.4.0｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
