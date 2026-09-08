@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.4.1
-# V3.4.1：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.4.2
+# V3.4.2：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.4.1 Fugle 即時行情層
+# ⚡ V3.4.2 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -87,14 +87,17 @@ def quote_age_seconds(time_text, now=None):
         return np.nan
 
 def quote_freshness_label(time_text, source=''):
-    if not time_text:
-        return '⚪ 無時間'
-    age=quote_age_seconds(time_text)
     if source.startswith('Fugle'):
+        if not time_text:return '🟠 Fugle 無時間'
+        age=quote_age_seconds(time_text)
         if pd.notna(age) and age<=90:return '🟢 即時'
         if pd.notna(age) and age<=600:return '🟡 稍延遲'
-        return '🟠 舊快照'
-    return '⚪ 日行情'
+        return '🟠 Fugle 舊快照'
+    if source=='官方日行情':
+        return '🔴 非即時｜官方最新盤後價'
+    if source=='Yahoo Finance 日K':
+        return '🔴 非即時｜Yahoo 最新日K'
+    return '🔴 非即時｜最新可用價'
 
 @st.cache_data(ttl=10, show_spinner=False)
 def load_fugle_snapshot(markets_tuple, _api_key=''):
@@ -188,7 +191,10 @@ def quote_date_health(qdate,source,now=None):
     expected=expected_quote_date_tw(now);qdate=str(qdate or '')
     if source=='Fugle 5秒快照' and expected:
         return '🟢 當日行情' if qdate==expected else f'🔴 日期落後（{qdate or "未知"}）'
-    return '🟢 Fugle' if source=='Fugle 5秒快照' else '⚪ 備援日行情'
+    if source=='Fugle 5秒快照':return '🟢 Fugle'
+    if source=='官方日行情':return f'🔴 盤後備援（{qdate or "日期未提供"}）'
+    if source=='Yahoo Finance 日K':return f'🔴 歷史日K備援（{qdate or "看技術資料日"}）'
+    return '🔴 非即時備援'
 
 def combine_quote_snapshots(fugle_df, official_df):
     """Fugle 優先；缺漏股票再由官方日行情補足。"""
@@ -1780,7 +1786,7 @@ def run_a235_portfolio(history, strategy_name, min_score, horizon,
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.1｜Fugle Hybrid Realtime＋A2.3.5 Strategy Lab Pro')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.2｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -1840,7 +1846,8 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.1｜Fugle 5秒行情快照＋盤中未完成日K即時計算＋Yahoo 2年歷史日K＋官方日行情備援＋A2.3.5 Reliability / Portfolio。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.2｜B模式：Fugle 即時優先；失敗時仍顯示最新盤後價，但非即時資料一律紅色警示＋資料真偽檢查。')
+st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
 a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔')
@@ -1851,12 +1858,13 @@ with st.expander('🕒 資料更新時間與價格來源',expanded=True):
     st.write(f"**Fugle 快照時間：** {FUGLE_SNAPSHOT_FETCH_TIME if (fugle_snapshot is not None and not fugle_snapshot.empty) else '未連線／無權限'}")
     st.write(f"**官方備援行情抓取：** {OFFICIAL_SNAPSHOT_FETCH_TIME}")
     st.write("**股票池更新規則：** 每日台灣時間 18:00 後首次執行自動同步；也可按側邊欄「更新股票池與行情」。")
+    st.caption('B 模式原則：有即時價就用即時價；沒有即時價也不隱藏股票，仍顯示最新官方盤後價 / Yahoo 日K，並以紅色狀態清楚標示。')
     if fugle_snapshot is not None and not fugle_snapshot.empty:
         st.success('⚡ Fugle 即時行情已啟用：排行榜使用 Fugle 價格，並把今日 OHLCV 當成未完成日K注入技術計算。')
     elif FUGLE_API_KEY:
-        st.warning('Fugle API Key 已載入，但 snapshot 未成功。可能是方案沒有 Snapshot Quotes 權限；目前自動使用官方日行情 / Yahoo 日K。')
+        st.warning('🔴 B模式：Fugle Key 已載入但即時 snapshot 未成功。排行榜仍顯示最新可用盤後價，但非即時資料會明確標紅。')
     else:
-        st.info('尚未設定 Fugle API Key。目前仍會正常運作，但盤中價格可能落後；正式盤中雷達建議設定 Fugle。')
+        st.info('🔴 B模式：尚未設定 Fugle API Key。排行榜仍顯示最新可用盤後價，但非即時資料會明確標紅。')
     if _session=='盤中' and (fugle_snapshot is None or fugle_snapshot.empty):
         st.warning('目前為盤中，但即時行情層未啟用：技術分數主要依完整日K，請勿把排行榜價格視為即時成交價。')
     elif _session!='盤中':
@@ -1871,7 +1879,7 @@ if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' i
         preview['成交額']=preview['成交額'].map(lambda x:f'{x:,.0f}')
         st.dataframe(preview,use_container_width=True,hide_index=True)
 if fugle_snapshot is None or fugle_snapshot.empty:
-    st.error('🚨 即時行情未啟用：排行榜正在使用官方日行情 / Yahoo 日K備援，因此可能顯示前一交易日收盤價。請打開「V3.4 即時行情診斷」確認 Fugle Key 與權限。')
+    st.error('🚨 B模式：即時行情未啟用。排行榜仍會顯示最新可用的官方盤後價 / Yahoo 日K，但這些價格不是即時成交價，會以紅色狀態標示。')
 else:
     _expected=expected_quote_date_tw()
     if _expected and '報價日期' in fugle_snapshot.columns:
@@ -1908,7 +1916,7 @@ with st.expander('⚡ V3.4 即時行情診斷',expanded=False):
         exp=expected_quote_date_tw()
         if exp and iq.get('日期')!=exp:st.error(f"🚨 單檔行情日期落後：預期 {exp}，實際 {iq.get('日期') or '未知'}")
     else:st.warning(f"**Fugle 單檔 intraday 測試失敗：** {iq_status}")
-    st.caption('若價格來源不是 Fugle 5秒快照，或 intraday 測試失敗，代表 App 沒有真正取得即時行情；此時舊價是資料源備援，不是時區問題。')
+    st.caption('B模式判讀：若價格來源不是 Fugle 5秒快照，App 仍保留最新可用盤後價，但會標紅；這是刻意的備援顯示，不代表即時行情。')
 
 rows=[];p=st.progress(0);status=st.empty()
 for i,s in enumerate(symbols):
@@ -2451,4 +2459,4 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.4.1｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.4.2｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
