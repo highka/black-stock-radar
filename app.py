@@ -4,7 +4,8 @@ import numpy as np
 import yfinance as yf
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
@@ -21,6 +22,29 @@ st.markdown('''
 .radar-card{border:1px solid rgba(128,128,128,.30);border-radius:14px;padding:14px 16px;margin-bottom:10px;min-height:170px}
 .radar-title{font-size:19px;font-weight:800}.radar-price{font-size:28px;font-weight:900;margin:4px 0}.radar-score{font-size:21px;font-weight:800;margin-top:6px}.small{opacity:.70;font-size:12px}.signal{font-weight:800;font-size:15px}
 </style>''', unsafe_allow_html=True)
+
+
+TAIWAN_TZ = ZoneInfo('Asia/Taipei')
+
+def taiwan_now():
+    return datetime.now(TAIWAN_TZ)
+
+def taiwan_time_text(dt=None):
+    dt=dt or taiwan_now()
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def taiwan_market_session(dt=None):
+    dt=dt or taiwan_now()
+    if dt.weekday()>=5:return '休市日'
+    hm=dt.hour*60+dt.minute
+    if hm<540:return '開盤前'
+    if hm<=810:return '盤中'
+    return '收盤後'
+
+def universe_effective_key(dt=None):
+    dt=dt or taiwan_now()
+    effective=dt.date() if dt.hour>=18 else (dt-timedelta(days=1)).date()
+    return effective.isoformat()
 
 DEFAULT_STOCKS='''1101,1102,1216,1301,1303,1402,1476,1597,2002,2301,2303,2308,2317,2330,2345,2353,2356,2359,2368,2376,2382,2395,2408,2454,2455,2603,2609,2615,3006,3034,3037,3044,3231,3260,3443,3455,3661,3711,4763,4966,5274,5483,6125,6147,6182,6239,6271,6409,6669,8046,8299'''
 
@@ -85,7 +109,7 @@ def fetch_json_api(url, timeout=20):
     raise last_error
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_market_universe():
+def load_market_universe(refresh_key=None):
     """從 TWSE / TPEx 官方 OpenAPI 自動建立上市、上櫃、興櫃公司股票池。
     API 失敗時回退至 stock_list.csv，避免整個雷達無法啟動。
     """
@@ -127,10 +151,10 @@ def load_market_universe():
             source_status=['官方 API 目前無法取得，已回退 stock_list.csv']
         else:
             source_status=['官方 API 與 stock_list.csv 都無資料']
-    return d, source_status
+    return d, source_status, taiwan_time_text()
 
 
-UNIVERSE, UNIVERSE_STATUS = load_market_universe()
+UNIVERSE, UNIVERSE_STATUS, UNIVERSE_FETCH_TIME = load_market_universe(universe_effective_key())
 
 def stock_name(s):
     if not UNIVERSE.empty and '股票名稱' in UNIVERSE.columns:
@@ -189,11 +213,11 @@ def load_market_snapshot():
             status.append(f'{market}：失敗（{type(e).__name__}） {msg}')
     d=pd.DataFrame(all_rows)
     if d.empty:
-        return pd.DataFrame(columns=['股票代號','股票名稱','市場','收盤價','漲跌','成交量','成交額','最高價','最低價']), status
+        return pd.DataFrame(columns=['股票代號','股票名稱','市場','收盤價','漲跌','成交量','成交額','最高價','最低價']), status, taiwan_time_text()
     d=d.drop_duplicates(['股票代號','市場'])
     d['成交額']=d['成交額'].fillna(0); d['成交量']=d['成交量'].fillna(0)
     d['漲跌幅%']=np.where(d['收盤價']>0,d['漲跌']/d['收盤價']*100,np.nan)
-    return d,status
+    return d,status,taiwan_time_text()
 
 
 def smart_rank_universe(universe, snapshot, selected_markets, top_n, min_volume, min_value, min_change):
@@ -265,9 +289,16 @@ def get_stock_data(symbol, market=None):
         if any(c not in d.columns for c in cols):return None
         d=d[cols].copy().dropna(subset=['Close'])
         if len(d)<200:return None
-        d.index=pd.to_datetime(d.index);d.index.name='Date'
+        d.index=pd.to_datetime(d.index)
+        if getattr(d.index,'tz',None) is not None:
+            d.index=d.index.tz_convert(TAIWAN_TZ).tz_localize(None)
+        d.index.name='Date'
         for c in cols:d[c]=pd.to_numeric(d[c],errors='coerce')
-        return d.dropna(subset=['Close'])
+        d=d.dropna(subset=['Close'])
+        d.attrs['source']='Yahoo Finance 日K'
+        d.attrs['fetch_time_tw']=taiwan_time_text()
+        d.attrs['latest_trade_date']=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if len(d) else ''
+        return d
     except Exception:return None
 
 def indicators(d):
@@ -339,10 +370,44 @@ def signals(d,score):
     if not s:s.append(score_level(score))
     return s
 
-def build_row(symbol,df):
+def build_row(symbol,df,quote_row=None,quote_fetch_time=None):
     if df is None or len(df)<200:return None
     d=indicators(df);x=d.iloc[-1];score,bd,reasons=black_score(d);sig=signals(d,score)
-    return {'股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'市場':stock_market(symbol),'價格':float(x.Close),'漲跌%':float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0,'成交量':float(x.Volume),'量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0.0,'K':float(x.K) if pd.notna(x.K) else np.nan,'D':float(x.D) if pd.notna(x.D) else np.nan,'MA15':float(x.MA15) if pd.notna(x.MA15) else np.nan,'MA60':float(x.MA60) if pd.notna(x.MA60) else np.nan,'MA200':float(x.MA200) if pd.notna(x.MA200) else np.nan,'連量':int(x.CONSEC_VOL),'20日高':float(x.HIGH20) if pd.notna(x.HIGH20) else np.nan,'60日高':float(x.HIGH60) if pd.notna(x.HIGH60) else np.nan,'黑嚕嚕分數':score,'等級':score_level(score),'訊號':'、'.join(sig),'判斷':'、'.join(dict.fromkeys(reasons[:8])),'趨勢分':bd['趨勢'],'動能分':bd['動能'],'量能分':bd['成交量'],'突破分':bd['突破'],'KD分':bd['KD'],'額外分':bd['額外強度'],'_df':d}
+
+    price=float(x.Close)
+    change=float(x.CHANGE) if pd.notna(x.CHANGE) else 0.0
+    display_volume=float(x.Volume)
+    price_source='Yahoo Finance 日K'
+    quote_used=False
+
+    if quote_row is not None:
+        try:
+            qprice=pd.to_numeric(quote_row.get('收盤價',np.nan),errors='coerce')
+            qchg=pd.to_numeric(quote_row.get('漲跌幅%',np.nan),errors='coerce')
+            qvol=pd.to_numeric(quote_row.get('成交量',np.nan),errors='coerce')
+            if pd.notna(qprice) and float(qprice)>0:
+                price=float(qprice);price_source='官方市場快照';quote_used=True
+            if pd.notna(qchg):change=float(qchg)
+            if pd.notna(qvol) and float(qvol)>=0:display_volume=float(qvol)
+        except Exception:
+            pass
+
+    return {
+        '股票':str(symbol).zfill(4),'名稱':stock_name(symbol),'市場':stock_market(symbol),
+        '價格':price,'漲跌%':change,'成交量':display_volume,
+        '量比':float(x.VOL_RATIO) if pd.notna(x.VOL_RATIO) else 0.0,
+        'K':float(x.K) if pd.notna(x.K) else np.nan,'D':float(x.D) if pd.notna(x.D) else np.nan,
+        'MA15':float(x.MA15) if pd.notna(x.MA15) else np.nan,'MA60':float(x.MA60) if pd.notna(x.MA60) else np.nan,
+        'MA200':float(x.MA200) if pd.notna(x.MA200) else np.nan,'連量':int(x.CONSEC_VOL),
+        '20日高':float(x.HIGH20) if pd.notna(x.HIGH20) else np.nan,'60日高':float(x.HIGH60) if pd.notna(x.HIGH60) else np.nan,
+        '黑嚕嚕分數':score,'等級':score_level(score),'訊號':'、'.join(sig),
+        '判斷':'、'.join(dict.fromkeys(reasons[:8])),'趨勢分':bd['趨勢'],'動能分':bd['動能'],
+        '量能分':bd['成交量'],'突破分':bd['突破'],'KD分':bd['KD'],'額外分':bd['額外強度'],
+        '技術資料日':pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d'),
+        '價格來源':price_source,
+        '行情抓取時間':quote_fetch_time if quote_used and quote_fetch_time else df.attrs.get('fetch_time_tw',''),
+        '_df':d
+    }
 
 
 # ============================================================
@@ -863,7 +928,7 @@ A23_STRATEGIES = {
     'MA60＋KD':  {'fast_ma':60, 'osc':'KD'},
 }
 
-A23_STRATEGY_SIGNATURE = '|'.join(
+A23_STRATEGY_SIGNATURE = 'A2.3.5|' + '|'.join(
     f"{name}:{cfg['fast_ma']}:{cfg['osc']}" for name,cfg in A23_STRATEGIES.items()
 )
 
@@ -952,12 +1017,23 @@ def strategy_lab_parts(hist, fast_ma=15, osc='KD'):
     vol_score=5*(_clip_score(amp,0,10)/10*0.65 + _clip_score(amp20 if pd.notna(amp20) else 0,0,8)/8*0.35)
     act=5*(_clip_score(vr,0,3)/3)
 
-    # 2) MA 結構：快均線依策略使用 MA15 或 MA20
+    # 2) MA 結構：A2.3.5 公平化 MA60
+    # MA15/20/30：收盤>快均線、快均線>MA60、MA60>MA200、快均線上彎
+    # MA60：不再出現「MA60 > MA60」的不可能條件，改成
+    #       收盤>MA60、MA60>MA200、MA60上彎、收盤與MA60距離不過度乖離
     ma=0
-    if pd.notna(fast) and close>fast: ma+=6
-    if pd.notna(ma60) and pd.notna(fast) and fast>ma60: ma+=4
-    if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: ma+=3
-    if pd.notna(x.FAST_SLOPE) and x.FAST_SLOPE>0: ma+=2
+    if int(fast_ma) < 60:
+        if pd.notna(fast) and close>fast: ma+=6
+        if pd.notna(ma60) and pd.notna(fast) and fast>ma60: ma+=4
+        if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: ma+=3
+        if pd.notna(x.FAST_SLOPE) and x.FAST_SLOPE>0: ma+=2
+    else:
+        if pd.notna(ma60) and close>ma60: ma+=6
+        if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: ma+=4
+        if pd.notna(x.FAST_SLOPE) and x.FAST_SLOPE>0: ma+=3
+        if pd.notna(ma60) and ma60>0:
+            dist60=(close/ma60-1)*100
+            if 0<=dist60<=12: ma+=2
     ma=min(ma,15)
 
     # 3) MA200 生命線
@@ -988,10 +1064,13 @@ def strategy_lab_parts(hist, fast_ma=15, osc='KD'):
     else:
         br=0
 
-    # 7) 策略品質：不用未來資料，以技術條件完整度計 0~10
+    # 7) 策略品質：A2.3.5 同步公平化 MA60
     confirmations=0
     if pd.notna(fast) and close>fast: confirmations+=1
-    if pd.notna(ma60) and pd.notna(fast) and fast>ma60: confirmations+=1
+    if int(fast_ma) < 60:
+        if pd.notna(ma60) and pd.notna(fast) and fast>ma60: confirmations+=1
+    else:
+        if pd.notna(ma200) and pd.notna(ma60) and ma60>ma200: confirmations+=1
     if pd.notna(ma200) and close>ma200: confirmations+=1
     if osc_score>=8: confirmations+=1
     if vr>=1.2 and chg>0: confirmations+=1
@@ -1122,7 +1201,7 @@ def strategy_lab_summary(grid, min_samples=20):
 
 
 # ============================================================
-# 🧪 A2.3.4 Strategy Lab Pro
+# 🧪 A2.3.6 Strategy Lab Pro
 # 新增：
 # 1) 95% 平均報酬信賴區間（常態近似）
 # 2) 穩健候選：樣本數達標且 95% CI 下限 > 0
@@ -1265,15 +1344,237 @@ def strategy_lab_band_summary(band_grid, min_samples=20):
     ).reset_index(drop=True) if rows else pd.DataFrame()
 
 
+
+# ============================================================
+# 🧪 A2.3.5 Reliability Lab
+# - 非重疊交易：同一股票持有期間內不重複進場
+# - 年度拆解：依進場年度檢查策略是否只在單一年份有效
+# - 樣本規模穩定度：50 / 100 / 200 / 300 檔逐步放大
+# - 真實資金曲線：本金、最大持股、單筆配置、費用、稅、滑價
+# ============================================================
+
+def select_a235_nonoverlap(frame, min_score, horizon, min_gap=0):
+    """同一股票持有中不重複進場；冷卻以真正交易日序號計算。"""
+    if frame is None or frame.empty:return pd.DataFrame()
+    base=frame.sort_values(['策略','股票','日期']).copy()
+    base['_trade_pos']=base.groupby(['策略','股票']).cumcount()
+    x=base[base['綜合分數']>=float(min_score)].copy()
+    effective_gap=max(int(min_gap),int(horizon)+1)
+    out=[]
+    for (strategy,sym),g in x.groupby(['策略','股票'],sort=False):
+        last=-10**9
+        for _,row in g.sort_values('日期').iterrows():
+            pos=int(row['_trade_pos'])
+            if pos-last<effective_gap:continue
+            out.append(row)
+            last=pos
+    return pd.DataFrame(out).drop(columns=['_trade_pos'],errors='ignore') if out else pd.DataFrame()
+
+def strategy_lab_grid_nonoverlap(history, thresholds, horizons, min_gap=0):
+    rows=[]
+    for hzn in horizons:
+        f=add_forward_returns_a23(history,hzn).dropna(subset=['未來報酬%'])
+        for strategy_name in A23_STRATEGIES:
+            sf=f[f['策略']==strategy_name]
+            for th in thresholds:
+                sel=select_a235_nonoverlap(sf,th,hzn,min_gap)
+                metrics=_trade_metrics_ci(sel['未來報酬%'] if not sel.empty else [])
+                rows.append({
+                    '策略':strategy_name,'最低分數':int(th),'持有交易日':int(hzn),
+                    '交易模式':'非重疊',**metrics
+                })
+    return pd.DataFrame(rows)
+
+def strategy_lab_yearly_nonoverlap(history, thresholds, horizons, min_gap=0):
+    """依進場年度拆解，避免只看整段期間平均。"""
+    rows=[]
+    if history is None or history.empty:return pd.DataFrame()
+    years=sorted(pd.to_datetime(history['日期']).dt.year.dropna().unique().tolist())
+    for hzn in horizons:
+        f=add_forward_returns_a23(history,hzn).dropna(subset=['未來報酬%']).copy()
+        f['進場年度']=pd.to_datetime(f['日期']).dt.year
+        for strategy_name in A23_STRATEGIES:
+            sf=f[f['策略']==strategy_name]
+            for th in thresholds:
+                sel=select_a235_nonoverlap(sf,th,hzn,min_gap)
+                if sel.empty:
+                    continue
+                sel['進場年度']=pd.to_datetime(sel['日期']).dt.year
+                for yr in years:
+                    y=sel[sel['進場年度']==yr]
+                    if y.empty:continue
+                    rows.append({
+                        '策略':strategy_name,'最低分數':int(th),'持有交易日':int(hzn),
+                        '年度':int(yr),**_trade_metrics_ci(y['未來報酬%'])
+                    })
+    return pd.DataFrame(rows)
+
+def strategy_lab_size_stability(history, thresholds, horizons, min_gap=0):
+    """用同一份已建立的歷史資料依股票數前綴比較 50/100/200/300。"""
+    if history is None or history.empty:return pd.DataFrame()
+    symbols_order=list(dict.fromkeys(history['股票'].astype(str).tolist()))
+    max_n=len(symbols_order)
+    sizes=[n for n in [50,100,200,300] if n<=max_n]
+    if max_n not in sizes:sizes.append(max_n)
+    rows=[]
+    for n in sorted(set(sizes)):
+        sub=history[history['股票'].astype(str).isin(set(symbols_order[:n]))].copy()
+        g=strategy_lab_grid_nonoverlap(sub,thresholds,horizons,min_gap)
+        if g.empty:continue
+        g['股票數']=int(n)
+        rows.append(g)
+    return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
+
+def _a235_signal_frame(history, strategy_name, min_score, horizon, min_gap=0):
+    """建立投資組合模擬訊號，並附上每筆實際退出日期。"""
+    h=history[history['策略']==strategy_name].copy()
+    if h.empty:return pd.DataFrame()
+    h=h.sort_values(['股票','日期']).reset_index(drop=True)
+    h['退出日期']=h.groupby('股票')['日期'].shift(-int(horizon))
+    h=h.dropna(subset=['退出日期'])
+    h['策略']=strategy_name
+    sel=select_a235_nonoverlap(h,horizon=horizon,min_score=min_score,min_gap=min_gap)
+    return sel.sort_values(['日期','綜合分數'],ascending=[True,False]).reset_index(drop=True)
+
+def run_a235_portfolio(history, strategy_name, min_score, horizon,
+                       initial_capital=1_000_000, max_positions=10, position_pct=10.0,
+                       fee_pct=0.1425, sell_tax_pct=0.30, slippage_pct=0.10,
+                       min_gap=0):
+    """
+    研究型每日收盤資金曲線：
+    - 訊號日收盤進場
+    - horizon 個交易日後收盤出場
+    - 同一股票不得重疊持有
+    - 同日訊號依綜合分數高到低填滿可用部位
+    - 可設定手續費 / 交易稅 / 滑價
+    """
+    if history is None or history.empty:
+        return pd.DataFrame(),pd.DataFrame(),{}
+
+    hist=history[history['策略']==strategy_name].copy()
+    if hist.empty:return pd.DataFrame(),pd.DataFrame(),{}
+
+    hist['日期']=pd.to_datetime(hist['日期'])
+    close_mat=hist.pivot_table(index='日期',columns='股票',values='收盤',aggfunc='last').sort_index()
+    signals=_a235_signal_frame(history,strategy_name,min_score,horizon,min_gap)
+    if signals.empty:return pd.DataFrame(),pd.DataFrame(),{}
+    signals['日期']=pd.to_datetime(signals['日期'])
+    signals['退出日期']=pd.to_datetime(signals['退出日期'])
+
+    by_date={d:g.sort_values('綜合分數',ascending=False) for d,g in signals.groupby('日期')}
+    dates=close_mat.index
+    cash=float(initial_capital)
+    positions={}
+    trades=[]
+    equity_rows=[]
+
+    fee=float(fee_pct)/100
+    tax=float(sell_tax_pct)/100
+    slip=float(slippage_pct)/100
+    alloc=float(position_pct)/100
+
+    for dt in dates:
+        row=close_mat.loc[dt]
+
+        # 先出場：持有到期者於當日收盤賣出
+        exit_syms=[]
+        for sym,pos in list(positions.items()):
+            if dt>=pos['exit_date']:
+                px=row.get(sym,np.nan)
+                if pd.isna(px):continue
+                sell_px=float(px)*(1-slip)
+                gross=pos['qty']*sell_px
+                sell_cost=gross*(fee+tax)
+                proceeds=gross-sell_cost
+                cash+=proceeds
+                pnl=proceeds-pos['total_buy_cost']
+                ret=pnl/pos['total_buy_cost']*100 if pos['total_buy_cost']>0 else np.nan
+                trades.append({
+                    '股票':sym,'進場日':pos['entry_date'],'出場日':dt,
+                    '進場分數':pos['score'],'持有交易日':int(horizon),
+                    '買進成本':pos['total_buy_cost'],'賣出淨收入':proceeds,
+                    '損益':pnl,'報酬%':ret
+                })
+                exit_syms.append(sym)
+        for sym in exit_syms:
+            positions.pop(sym,None)
+
+        # 進場前先估算目前權益
+        mtm=sum(pos['qty']*float(row.get(sym,np.nan))
+                for sym,pos in positions.items() if pd.notna(row.get(sym,np.nan)))
+        equity_before=cash+mtm
+
+        # 再進場：同日依分數由高到低
+        if dt in by_date:
+            for _,sig in by_date[dt].iterrows():
+                sym=str(sig['股票'])
+                if sym in positions or len(positions)>=int(max_positions):continue
+                px=row.get(sym,np.nan)
+                if pd.isna(px) or float(px)<=0:continue
+                target=min(equity_before*alloc, cash/(1+fee))
+                if target<=0:continue
+                buy_px=float(px)*(1+slip)
+                qty=target/(buy_px*(1+fee))
+                gross=qty*buy_px
+                buy_fee=gross*fee
+                total_cost=gross+buy_fee
+                if total_cost>cash:continue
+                cash-=total_cost
+                positions[sym]={
+                    'qty':qty,'entry_date':dt,'exit_date':pd.to_datetime(sig['退出日期']),
+                    'score':float(sig['綜合分數']),'total_buy_cost':total_cost
+                }
+
+        # 每日收盤淨值
+        pos_value=0.0
+        for sym,pos in positions.items():
+            px=row.get(sym,np.nan)
+            if pd.notna(px):pos_value+=pos['qty']*float(px)
+        equity=cash+pos_value
+        equity_rows.append({
+            '日期':dt,'現金':cash,'持股市值':pos_value,'總資產':equity,'持股數':len(positions)
+        })
+
+    eq=pd.DataFrame(equity_rows)
+    tr=pd.DataFrame(trades)
+    if eq.empty:return eq,tr,{}
+
+    eq['累積報酬%']=(eq['總資產']/float(initial_capital)-1)*100
+    eq['高水位']=eq['總資產'].cummax()
+    eq['回撤%']=(eq['總資產']/eq['高水位']-1)*100
+
+    total_return=(eq['總資產'].iloc[-1]/float(initial_capital)-1)*100
+    mdd=float(eq['回撤%'].min())
+    days=max((eq['日期'].iloc[-1]-eq['日期'].iloc[0]).days,1)
+    cagr=((eq['總資產'].iloc[-1]/float(initial_capital))**(365.25/days)-1)*100 if eq['總資產'].iloc[-1]>0 else np.nan
+    if not tr.empty:
+        win=float((tr['報酬%']>0).mean()*100)
+        avg=float(tr['報酬%'].mean())
+        pf=(tr.loc[tr['損益']>0,'損益'].sum()/abs(tr.loc[tr['損益']<0,'損益'].sum())
+            if (tr['損益']<0).any() else np.inf)
+    else:
+        win=avg=np.nan;pf=np.nan
+
+    stats={
+        '期末資產':float(eq['總資產'].iloc[-1]),
+        '總報酬%':float(total_return),'年化報酬%':float(cagr),'最大回撤%':mdd,
+        '完成交易':int(len(tr)),'勝率%':win,'平均每筆%':avg,'Profit Factor':float(pf) if pd.notna(pf) else np.nan
+    }
+    return eq,tr,stats
+
+
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.4 Strategy Lab Pro')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.3.2｜全市場股票池＋A2.2＋A2.3.6 Strategy Lab Pro')
 mode=st.sidebar.selectbox('雷達模式',['全部股票','🟣 黑嚕嚕超強','🔥 強勢股','🚀 強勢突破','🔥 主升段','🟢 守護生命線','⚠️ 大量換手高危','🔴 趨勢轉弱'])
 markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['上市','上櫃','興櫃'])
-if st.sidebar.button('🔄 更新全市場股票池'):
+if st.sidebar.button('🔄 更新股票池與行情'):
     load_market_universe.clear()
+    load_market_snapshot.clear()
+    get_stock_data.clear()
     st.rerun()
 counts=UNIVERSE['市場'].value_counts().to_dict() if not UNIVERSE.empty else {}
 st.sidebar.caption(f"官方股票池：上市 {counts.get('上市',0)}｜上櫃 {counts.get('上櫃',0)}｜興櫃 {counts.get('興櫃',0)}")
+st.sidebar.caption(f"股票池最近同步（台灣）：{UNIVERSE_FETCH_TIME}｜每日 18:00 後首次執行自動換日同步，也可手動更新")
 scan_mode=st.sidebar.radio('掃描方式',['🧠 全市場智能掃描','🎯 指定股票池'],index=0)
 max_n=st.sidebar.slider('技術精掃檔數',20,500,200,10);min_score=st.sidebar.slider('最低黑嚕嚕分數',0,100,50,5);min_vr=st.sidebar.slider('最低量比',0.5,5.0,1.0,0.1)
 change_range=st.sidebar.slider('漲跌幅範圍 (%)',-10.0,10.0,(-10.0,10.0),0.5);k_range=st.sidebar.slider('KD K值範圍',0,100,(0,100),1)
@@ -1294,9 +1595,9 @@ market_map=dict(zip(UNIVERSE['股票代號'],UNIVERSE['市場'])) if not UNIVERS
 if not STOCK_LIST.empty and '股票代號' in STOCK_LIST.columns and '市場' in STOCK_LIST.columns:
     market_map.update(dict(zip(STOCK_LIST['股票代號'].astype(str).str.zfill(4),STOCK_LIST['市場'])))
 symbols=[x for x in symbols if not markets or market_map.get(x,'未分類') in markets]
-smart_snapshot=pd.DataFrame();smart_status=[];smart_note=''
+smart_snapshot=pd.DataFrame();smart_status=[];smart_note='';SMART_SNAPSHOT_FETCH_TIME='未抓取'
 if scan_mode.startswith('🧠'):
-    smart_snapshot,smart_status=load_market_snapshot()
+    smart_snapshot,smart_status,SMART_SNAPSHOT_FETCH_TIME=load_market_snapshot()
     base_universe=UNIVERSE[UNIVERSE['市場'].isin(markets)].copy() if not UNIVERSE.empty else pd.DataFrame()
     smart_pool,smart_note=smart_rank_universe(base_universe,smart_snapshot,markets,max_n,smart_min_volume,smart_min_value,smart_min_change)
     symbols=smart_pool['股票代號'].astype(str).str.zfill(4).tolist()
@@ -1304,8 +1605,27 @@ if scan_mode.startswith('🧠'):
 else:
     symbols=symbols[:max_n]
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3｜智能掃描 2.0＋A2.2 策略健診＋A2.3 Strategy Lab 八策略PK；行情仍為 yfinance 日資料。')
-a,b,c,d,e=st.columns(5);a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔');c.metric('最低量比',f'{min_vr:.1f}x');d.metric('市場','＋'.join(markets) if markets else '未選');e.metric('更新時間',datetime.now().strftime('%H:%M:%S'));st.divider()
+quote_map={}
+if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in smart_snapshot.columns:
+    for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='last').iterrows():
+        quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
+
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.3.2 A2.3.6｜台灣時間＋資料新鮮度檢查＋A2.3.5 Reliability / Portfolio；技術指標仍以 Yahoo Finance 日K 為基礎。')
+_now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
+a,b,c,d,e=st.columns(5)
+a.metric('技術精掃',f'{len(symbols)} 檔');b.metric('全市場股票池',f'{len(UNIVERSE)} 檔')
+c.metric('最低量比',f'{min_vr:.1f}x');d.metric('台股狀態',_session);e.metric('畫面更新（台灣）',_now_tw.strftime('%H:%M:%S'))
+with st.expander('🕒 資料更新時間與價格來源',expanded=True):
+    st.write(f"**台灣時間：** {taiwan_time_text(_now_tw)}")
+    st.write(f"**股票池最近同步：** {UNIVERSE_FETCH_TIME}（台灣時間）")
+    st.write(f"**官方行情快照抓取：** {SMART_SNAPSHOT_FETCH_TIME if scan_mode.startswith('🧠') else '指定股票池模式未抓取'}")
+    st.write("**股票池更新規則：** 每日台灣時間 18:00 後，當天第一次重新執行會自動抓官方上市／上櫃／興櫃基本資料；也可按側邊欄「更新股票池與行情」立即重抓。")
+    st.write("**價格邏輯：** 技術指標使用 Yahoo Finance 日K；全市場智能掃描若成功取得官方市場快照，排行榜顯示價格優先使用官方快照。")
+    if _session=='盤中':
+        st.warning('目前為台股盤中。Yahoo Finance 1日K不保證是即時成交價，因此技術分數屬日K雷達，不是逐筆即時報價。')
+    else:
+        st.info('目前非一般交易時段。若是凌晨或開盤前，看到上一個交易日價格是正常的；下一個交易日尚未開盤，不會有新的日K收盤價。')
+st.divider()
 if scan_mode.startswith('🧠') and not smart_pool.empty and '智能初篩分' in smart_pool.columns:
     with st.expander('🔎 查看 V3.3.2 智能候選池',expanded=False):
         preview=smart_pool[['股票代號','股票名稱','市場','智能初篩分','漲跌幅%','成交量','成交額']].copy()
@@ -1322,7 +1642,7 @@ rows=[];p=st.progress(0);status=st.empty()
 for i,s in enumerate(symbols):
     status.text(f'正在掃描：{s} {stock_name(s)}　({i+1}/{len(symbols)})');df=get_stock_data(s, market_map.get(s))
     if df is None: p.progress((i+1)/max(len(symbols),1));continue
-    r=build_row(s,df)
+    r=build_row(s,df,quote_map.get(str(s).zfill(4)),SMART_SNAPSHOT_FETCH_TIME)
     if r:
         sig=r['訊號'];market_ok=(not markets or r['市場'] in markets or r['市場']=='未分類');change_ok=change_range[0]<=r['漲跌%']<=change_range[1];k_ok=pd.isna(r['K']) or k_range[0]<=r['K']<=k_range[1];base=r['黑嚕嚕分數']>=min_score and r['量比']>=min_vr and change_ok and k_ok and market_ok
         mode_ok={'全部股票':True,'🟣 黑嚕嚕超強':r['黑嚕嚕分數']>=90,'🔥 強勢股':r['黑嚕嚕分數']>=80 and r['漲跌%']>0,'🚀 強勢突破':'🚀 強勢突破' in sig,'🔥 主升段':'🔥 主升段' in sig,'🟢 守護生命線':'🟢 守護生命線' in sig,'⚠️ 大量換手高危':'⚠️ 爆量高危' in sig,'🔴 趨勢轉弱':'🔴 趨勢轉弱' in sig}.get(mode,True)
@@ -1331,6 +1651,11 @@ for i,s in enumerate(symbols):
 status.empty();p.empty()
 if not rows:st.warning('目前沒有符合條件的股票。可以降低最低黑嚕嚕分數、量比、KD／漲跌幅，或增加股票池。');st.stop()
 result=pd.DataFrame(rows);result=add_composite_columns(result);sort_col={'黑嚕嚕分數':'黑嚕嚕分數','漲跌幅':'漲跌%','量比':'量比','K值':'K','價格':'價格'}[sort_mode];result=result.sort_values(sort_col,ascending=False,na_position='last').reset_index(drop=True)
+if '技術資料日' in result.columns and not result.empty:
+    _dates=sorted(result['技術資料日'].dropna().astype(str).unique().tolist())
+    _latest='、'.join(_dates[-3:]) if _dates else '未知'
+    _src='官方市場快照優先' if (result['價格來源']=='官方市場快照').any() else 'Yahoo Finance 日K'
+    st.caption(f"📅 技術日K最新資料日：{_latest}｜畫面價格來源：{_src}")
 
 strong=int((result['黑嚕嚕分數']>=80).sum());breakout=int(result['訊號'].str.contains('🚀 強勢突破',regex=False).sum());risk=int(result['訊號'].str.contains('⚠️ 爆量高危',regex=False).sum());weak=int(result['訊號'].str.contains('🔴 趨勢轉弱',regex=False).sum())
 a,b,c,d,e=st.columns(5);a.metric('符合條件',f'{len(result)} 檔');b.metric('🔥 80分以上',f'{strong} 檔');c.metric('🚀 突破',f'{breakout} 檔');d.metric('⚠️ 高危',f'{risk} 檔');e.metric('🔴 轉弱',f'{weak} 檔');st.divider()
@@ -1342,7 +1667,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
 
 t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab'])
 with t1:
-    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
+    show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','技術資料日','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
 with t2:
     st.subheader('🚨 黑嚕嚕訊號中心')
@@ -1523,8 +1848,8 @@ with t8:
 
 
 with t9:
-    st.subheader('🧪 A2.3.4 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
-    st.caption('同一批股票、同一段歷史、同一進出場規則，只比較「MA15 / MA20」與「RSI / KD」。目標是找出真正的甜蜜點，而不是假設最高分一定最好。')
+    st.subheader('🧪 A2.3.6 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
+    st.caption('同一批股票、同一段歷史、同一進出場規則，比較 MA15 / MA20 / MA30 / MA60 × RSI / KD。A2.3.5 再加入非重疊交易、年度拆解、樣本穩定度與真實資金曲線。')
 
     st.markdown('### 🧬 本版比較的八套策略')
     strategy_desc=pd.DataFrame([
@@ -1538,7 +1863,7 @@ with t9:
         {'策略':'MA60＋KD','快均線':'MA60','動能':'9日KD','用途':'波段趨勢＋KD轉折'}
     ])
     st.dataframe(strategy_desc,use_container_width=True,hide_index=True)
-    st.info('A2.3.3 新增 MA30 與 MA60，與 MA15/MA20 公平 PK；MA200 生命線仍保留。MA60 主要用來測試較慢的波段趨勢濾網。')
+    st.info('A2.3.5 已修正 MA60 評分公平性：不再使用 MA60>MA60 的不可能條件；MA200 生命線仍保留。')
 
     a,b,c,d=st.columns(4)
     with a:
@@ -1580,11 +1905,13 @@ with t9:
                 }
                 st.session_state['a23_strategy_signature']=A23_STRATEGY_SIGNATURE
 
-    # A2.3.4：避免 Streamlit 沿用舊版四策略 session_state。
+    # A2.3.6：避免 Streamlit 沿用舊版四策略 session_state。
     # 若策略集合有變更，就自動清除舊 A2.3 回測結果，要求重新執行。
     saved_sig=st.session_state.get('a23_strategy_signature')
     if saved_sig is not None and saved_sig != A23_STRATEGY_SIGNATURE:
-        for _k in ['a23_hist','a23_grid','a23_band_grid','a23_settings']:
+        for _k in ['a23_hist','a23_grid','a23_band_grid','a23_settings',
+                   'a235_nonoverlap','a235_yearly','a235_size',
+                   'a235_equity','a235_trades','a235_port_stats']:
             st.session_state.pop(_k,None)
 
     grid23=st.session_state.get('a23_grid',pd.DataFrame())
@@ -1715,9 +2042,122 @@ with t9:
                 )
                 st.bar_chart(view_band.set_index('分數區間')['平均報酬%'])
 
-        st.markdown('### 🔬 ⑦ 研究結論提醒')
-        st.write('A2.3.2 不只挑「平均報酬最高」；現在同時看樣本數、Profit Factor、最大回撤、勝率與 95% 信賴區間。若冠軍只靠很少樣本，先視為候選，不直接定版。')
-        st.warning('A2.3 仍屬研究性回測：目前股票池存在存活者偏差；智能四項是 OHLCV 歷史代理；未計手續費、交易稅、滑價、漲跌停與實際資金部位。下一階段應做 A2.4 走勢外樣本／投資組合回測。')
+
+        st.markdown('### 🧱 ⑦ A2.3.5 非重疊交易驗證')
+        st.caption('持有 20 日時，同一股票這 20 日內不再重複計入新訊號，避免同一波上漲被重複算很多次。')
+        if st.button('▶ 執行 A2.3.5 可靠度驗證',key='run_a235_reliability'):
+            non23=strategy_lab_grid_nonoverlap(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+            year23=strategy_lab_yearly_nonoverlap(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+            size23=strategy_lab_size_stability(hist23,a23_thresholds,a23_horizons,int(a23_gap))
+            st.session_state['a235_nonoverlap']=non23
+            st.session_state['a235_yearly']=year23
+            st.session_state['a235_size']=size23
+
+        non23=st.session_state.get('a235_nonoverlap',pd.DataFrame())
+        year23=st.session_state.get('a235_yearly',pd.DataFrame())
+        size23=st.session_state.get('a235_size',pd.DataFrame())
+
+        if not non23.empty:
+            nr=strategy_lab_robust_rank(non23,int(a23_min_samples))
+            if not nr.empty:
+                cols_nr=['穩健排名','穩健候選','策略','最低分數','持有交易日','樣本數',
+                         '勝率%','平均報酬%','平均報酬95%CI下限','Profit Factor','最大回撤%']
+                st.dataframe(nr[cols_nr].head(30).style.format({
+                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
+                    '平均報酬95%CI下限':'{:+.2f}%','Profit Factor':'{:.2f}',
+                    '最大回撤%':'{:+.2f}%'
+                }),use_container_width=True,hide_index=True)
+
+        st.markdown('### 📅 ⑧ 年度拆解｜看策略是不是只在某一年有效')
+        if not year23.empty:
+            ystrategy=st.selectbox('年度拆解策略',list(A23_STRATEGIES.keys()),key='a235_year_strategy')
+            yth=st.selectbox('年度拆解最低分數',sorted(year23['最低分數'].unique().tolist()),key='a235_year_th')
+            yh=st.selectbox('年度拆解持有日',sorted(year23['持有交易日'].unique().tolist()),key='a235_year_h')
+            yv=year23[(year23['策略']==ystrategy)&(year23['最低分數']==yth)&(year23['持有交易日']==yh)].copy()
+            if not yv.empty:
+                st.dataframe(yv[['年度','樣本數','勝率%','平均報酬%','中位數報酬%','平均報酬95%CI下限',
+                                  '平均報酬95%CI上限','Profit Factor','最大回撤%']].style.format({
+                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
+                    '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
+                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+                }),use_container_width=True,hide_index=True)
+        else:
+            st.info('先執行上方「A2.3.5 可靠度驗證」，才會建立年度拆解。')
+
+        st.markdown('### 📐 ⑨ 股票數穩定度｜50 → 100 → 200 → 300')
+        if not size23.empty:
+            sstrategy=st.selectbox('穩定度策略',list(A23_STRATEGIES.keys()),key='a235_size_strategy')
+            sth=st.selectbox('穩定度最低分數',sorted(size23['最低分數'].unique().tolist()),key='a235_size_th')
+            sh=st.selectbox('穩定度持有日',sorted(size23['持有交易日'].unique().tolist()),key='a235_size_h')
+            sv=size23[(size23['策略']==sstrategy)&(size23['最低分數']==sth)&(size23['持有交易日']==sh)].copy()
+            if not sv.empty:
+                st.dataframe(sv[['股票數','樣本數','勝率%','平均報酬%','平均報酬95%CI下限','Profit Factor','最大回撤%']].style.format({
+                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','平均報酬95%CI下限':'{:+.2f}%',
+                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
+                }),use_container_width=True,hide_index=True)
+                st.line_chart(sv.set_index('股票數')[['平均報酬%','勝率%']])
+        else:
+            st.info('先執行上方「A2.3.5 可靠度驗證」。若本次只回測 100 檔，就只能比較 50 / 100。')
+
+        st.markdown('### 💰 ⑩ 真實資金曲線｜Portfolio MDD')
+        st.caption('這裡的最大回撤才是依每日總資產計算的 Portfolio MDD；與前面逐筆交易序列的「最大回撤」意義不同。')
+        pc1,pc2,pc3,pc4=st.columns(4)
+        with pc1:
+            p_strategy=st.selectbox('資金曲線策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋RSI'),key='a235_p_strategy')
+            p_score=st.selectbox('進場最低分數',[65,70,75,80,85,90],index=4,key='a235_p_score')
+        with pc2:
+            p_horizon=st.selectbox('持有交易日',[3,5,10,20],index=3,key='a235_p_horizon')
+            p_capital=st.number_input('起始本金',min_value=100000,max_value=100000000,value=1000000,step=100000,key='a235_p_capital')
+        with pc3:
+            p_maxpos=st.number_input('最多同時持股',min_value=1,max_value=30,value=10,step=1,key='a235_p_maxpos')
+            p_pct=st.number_input('單檔目標配置%',min_value=1.0,max_value=100.0,value=10.0,step=1.0,key='a235_p_pct')
+        with pc4:
+            p_fee=st.number_input('單邊手續費%',min_value=0.0,max_value=1.0,value=0.1425,step=0.01,format='%.4f',key='a235_p_fee')
+            p_tax=st.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='a235_p_tax')
+            p_slip=st.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='a235_p_slip')
+
+        if st.button('▶ 執行真實資金曲線',type='primary',key='run_a235_portfolio'):
+            eq23,tr23,ps23=run_a235_portfolio(
+                hist23,p_strategy,p_score,p_horizon,p_capital,p_maxpos,p_pct,
+                p_fee,p_tax,p_slip,int(a23_gap)
+            )
+            st.session_state['a235_equity']=eq23
+            st.session_state['a235_trades']=tr23
+            st.session_state['a235_port_stats']=ps23
+
+        eq23=st.session_state.get('a235_equity',pd.DataFrame())
+        tr23=st.session_state.get('a235_trades',pd.DataFrame())
+        ps23=st.session_state.get('a235_port_stats',{})
+
+        if ps23:
+            m1,m2,m3,m4=st.columns(4)
+            m1.metric('期末資產',f"${ps23['期末資產']:,.0f}")
+            m2.metric('總報酬',f"{ps23['總報酬%']:+.2f}%")
+            m3.metric('年化報酬',f"{ps23['年化報酬%']:+.2f}%")
+            m4.metric('Portfolio MDD',f"{ps23['最大回撤%']:+.2f}%")
+            m5,m6,m7,m8=st.columns(4)
+            m5.metric('完成交易',f"{ps23['完成交易']:,}")
+            m6.metric('勝率',f"{ps23['勝率%']:.1f}%" if pd.notna(ps23['勝率%']) else '—')
+            m7.metric('平均每筆',f"{ps23['平均每筆%']:+.2f}%" if pd.notna(ps23['平均每筆%']) else '—')
+            m8.metric('Profit Factor',f"{ps23['Profit Factor']:.2f}" if pd.notna(ps23['Profit Factor']) else '—')
+            if not eq23.empty:
+                st.line_chart(eq23.set_index('日期')['總資產'])
+                st.area_chart(eq23.set_index('日期')['回撤%'])
+            if not tr23.empty:
+                st.dataframe(tr23.tail(100).style.format({
+                    '進場分數':'{:.1f}','買進成本':'{:,.0f}','賣出淨收入':'{:,.0f}',
+                    '損益':'{:+,.0f}','報酬%':'{:+.2f}%'
+                }),use_container_width=True,hide_index=True)
+                st.download_button('⬇️ 匯出 Portfolio 交易紀錄',
+                                   tr23.to_csv(index=False).encode('utf-8-sig'),
+                                   'A2.3.5_portfolio_trades.csv','text/csv',key='a235_dl_trades')
+                st.download_button('⬇️ 匯出 Portfolio 每日淨值',
+                                   eq23.to_csv(index=False).encode('utf-8-sig'),
+                                   'A2.3.5_portfolio_equity.csv','text/csv',key='a235_dl_equity')
+
+        st.markdown('### 🔬 ⑪ 研究結論提醒')
+        st.write('A2.3.5 先用非重疊交易、年度拆解、股票數穩定度與 Portfolio MDD 驗證，再決定 MA15/20/30/60 × RSI/KD 哪套值得定版。')
+        st.warning('A2.3.5 仍屬研究性回測：股票池仍可能有存活者偏差，OHLCV 智能四項仍是歷史代理；Portfolio 已可計費用/稅/滑價與部位，但仍未模擬漲跌停、整張/零股成交限制與真實委託撮合。')
 
         st.download_button('⬇️ 匯出 A2.3 全策略比較 CSV',
                            grid23.to_csv(index=False).encode('utf-8-sig'),
@@ -1734,4 +2174,4 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.3.2 A2.3.6｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
