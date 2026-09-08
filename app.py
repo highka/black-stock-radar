@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.4.3
-# V3.4.3：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.4.4
+# V3.4.4：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.4.3 Fugle 即時行情層
+# ⚡ V3.4.4 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -93,7 +93,7 @@ def quote_freshness_label(time_text, source=''):
         if pd.notna(age) and age<=90:return '🟢 即時'
         if pd.notna(age) and age<=600:return '🟡 稍延遲'
         return '🟠 Fugle 舊快照'
-    if source=='官方日行情':
+    if source in ('官方日行情','TWSE每日收盤行情'):
         return '🔴 非即時｜官方最新盤後價'
     if source=='Yahoo Finance 日K':
         return '🔴 非即時｜Yahoo 最新日K'
@@ -192,7 +192,7 @@ def quote_date_health(qdate,source,now=None):
     if source=='Fugle 5秒快照' and expected:
         return '🟢 當日行情' if qdate==expected else f'🔴 日期落後（{qdate or "未知"}）'
     if source=='Fugle 5秒快照':return '🟢 Fugle'
-    if source=='官方日行情':return f'🔴 盤後備援（{qdate or "日期未提供"}）'
+    if source in ('官方日行情','TWSE每日收盤行情'):return f'🔴 盤後備援（{qdate or "日期未提供"}）'
     if source=='Yahoo Finance 日K':return f'🔴 歷史日K備援（{qdate or "看技術資料日"}）'
     return '🔴 非即時備援'
 
@@ -226,6 +226,65 @@ def expected_completed_market_date(now=None):
         d=d-timedelta(days=1)
     return pd.Timestamp(d)
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_twse_daily_report():
+    """
+    直接讀 TWSE 每日收盤行情 MI_INDEX（ALLBUT0999）。
+    這個來源包含：成交股數、開盤、最高、最低、收盤、漲跌。
+    用來修正 STOCK_DAY_ALL / yfinance 更新延遲造成的最後一根K棒落後。
+    """
+    cols=['股票代號','股票名稱','市場','收盤價','漲跌','漲跌幅%','成交量','成交額',
+          '開盤價','最高價','最低價','報價日期','報價時間','行情來源']
+    try:
+        url='https://www.twse.com.tw/exchangeReport/MI_INDEX'
+        r=requests.get(url,params={'response':'json','type':'ALLBUT0999'},timeout=20,
+                       headers={'User-Agent':'Mozilla/5.0'})
+        r.raise_for_status()
+        x=r.json()
+        if str(x.get('stat','')).upper()!='OK':
+            return pd.DataFrame(columns=cols),f"TWSE MI_INDEX：{x.get('stat','非OK')}",''
+        tables=x.get('tables',[])
+        target=None
+        for tb in tables:
+            fields=tb.get('fields',[])
+            if '證券代號' in fields and '收盤價' in fields and '開盤價' in fields:
+                target=tb;break
+        if not target:
+            return pd.DataFrame(columns=cols),'TWSE MI_INDEX：找不到個股行情表',''
+        fields=target['fields']
+        rows=[]
+        def clean_num(v):
+            s=str(v).replace(',','').replace('--','').strip()
+            return pd.to_numeric(s,errors='coerce')
+        for vals in target.get('data',[]):
+            item=dict(zip(fields,vals))
+            code=str(item.get('證券代號','')).strip()
+            if not re.fullmatch(r'\d{4,6}',code):continue
+            close=clean_num(item.get('收盤價'))
+            if pd.isna(close):continue
+            sign=str(item.get('漲跌(+/-)',''))
+            chg=clean_num(item.get('漲跌價差'))
+            if pd.notna(chg) and ('-' in sign or '－' in sign):
+                chg=-abs(float(chg))
+            elif pd.notna(chg):
+                chg=abs(float(chg))
+            prev=float(close)-float(chg) if pd.notna(chg) else np.nan
+            rows.append({
+                '股票代號':code.zfill(4),'股票名稱':str(item.get('證券名稱','')).strip(),'市場':'上市',
+                '收盤價':float(close),'漲跌':chg,
+                '漲跌幅%':float(chg)/prev*100 if pd.notna(chg) and prev>0 else np.nan,
+                '成交量':clean_num(item.get('成交股數')),'成交額':clean_num(item.get('成交金額')),
+                '開盤價':clean_num(item.get('開盤價')),'最高價':clean_num(item.get('最高價')),
+                '最低價':clean_num(item.get('最低價')),
+                '報價日期':expected_completed_market_date().strftime('%Y-%m-%d'),
+                '報價時間':taiwan_time_text(),'行情來源':'TWSE每日收盤行情'
+            })
+        d=pd.DataFrame(rows,columns=cols)
+        return d,f'TWSE MI_INDEX：{len(d)} 檔',taiwan_time_text()
+    except Exception as e:
+        return pd.DataFrame(columns=cols),f'TWSE MI_INDEX：失敗（{type(e).__name__}: {str(e)[:90]}）',''
+
 def inject_official_eod_bar(df, quote_row):
     """
     B模式盤後修正：
@@ -233,7 +292,7 @@ def inject_official_eod_bar(df, quote_row):
     將最近已完成交易日 OHLCV 補入 Yahoo 歷史日K，讓個股圖與技術指標不再卡在前一日。
     """
     if df is None or quote_row is None:return df,False,''
-    if str(quote_row.get('行情來源',''))!='官方日行情':return df,False,''
+    if str(quote_row.get('行情來源','')) not in ('官方日行情','TWSE每日收盤行情'):return df,False,''
     try:
         close=pd.to_numeric(quote_row.get('收盤價'),errors='coerce')
         if pd.isna(close) or float(close)<=0:return df,False,''
@@ -1844,7 +1903,7 @@ def run_a235_portfolio(history, strategy_name, min_score, horizon,
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.3｜B模式：即時優先＋最新盤後價備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.4｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -1857,6 +1916,7 @@ markets=st.sidebar.multiselect('市場',['上市','上櫃','興櫃'],default=['�
 if st.sidebar.button('🔄 更新股票池與行情'):
     load_market_universe.clear()
     load_market_snapshot.clear()
+    load_twse_daily_report.clear()
     load_fugle_snapshot.clear()
     fugle_intraday_quote.clear()
     get_stock_data.clear()
@@ -1885,6 +1945,11 @@ if not STOCK_LIST.empty and '股票代號' in STOCK_LIST.columns and '市場' in
     market_map.update(dict(zip(STOCK_LIST['股票代號'].astype(str).str.zfill(4),STOCK_LIST['市場'])))
 symbols=[x for x in symbols if not markets or market_map.get(x,'未分類') in markets]
 official_snapshot,official_status,OFFICIAL_SNAPSHOT_FETCH_TIME=load_market_snapshot()
+twse_eod,twse_eod_status,TWSE_EOD_FETCH_TIME=load_twse_daily_report()
+# 上市股票盤後優先使用 TWSE MI_INDEX；它直接提供完整 OHLCV
+if twse_eod is not None and not twse_eod.empty:
+    _other=official_snapshot[official_snapshot['市場']!='上市'].copy() if official_snapshot is not None and not official_snapshot.empty else pd.DataFrame()
+    official_snapshot=pd.concat([twse_eod,_other],ignore_index=True,sort=False)
 fugle_snapshot,fugle_status,FUGLE_SNAPSHOT_FETCH_TIME=load_fugle_snapshot(tuple(markets),FUGLE_API_KEY)
 smart_snapshot=combine_quote_snapshots(fugle_snapshot,official_snapshot)
 smart_status=(fugle_status if FUGLE_API_KEY else [])+official_status
@@ -1904,7 +1969,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.3｜B模式＋盤後K修正：Fugle 即時優先；Fugle 不可用時，用 TWSE/TPEx 官方盤後 OHLCV 補齊 Yahoo 尚未更新的最後一根K棒。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.4｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -1954,6 +2019,12 @@ with st.expander('⚡ V3.4 即時行情診斷',expanded=False):
     st.write(f"**Fugle Key：** {'已載入' if FUGLE_API_KEY else '未設定'}")
     st.write(f"**Fugle 快照筆數：** {0 if fugle_snapshot is None else len(fugle_snapshot):,}")
     st.write(f"**官方備援筆數：** {0 if official_snapshot is None else len(official_snapshot):,}")
+    st.write(f"**TWSE 每日收盤行情：** {twse_eod_status}｜抓取 {TWSE_EOD_FETCH_TIME or '—'}")
+    if twse_eod is not None and not twse_eod.empty:
+        _w=twse_eod[twse_eod['股票代號'].astype(str).str.zfill(4)=='2436']
+        if not _w.empty:
+            _w=_w.iloc[-1]
+            st.write(f"**2436 偉詮電 TWSE驗證：** O {_w.get('開盤價','—')}｜H {_w.get('最高價','—')}｜L {_w.get('最低價','—')}｜C {_w.get('收盤價','—')}｜日期 {_w.get('報價日期','—')}")
     if fugle_status: st.write('**Fugle 狀態：** '+'｜'.join(fugle_status))
     if official_status: st.write('**官方狀態：** '+'｜'.join(official_status))
     test_code='3167'
@@ -1995,7 +2066,7 @@ if '技術資料日' in result.columns and not result.empty:
     _latest='、'.join(_dates[-3:]) if _dates else '未知'
     if (result['價格來源']=='Fugle 5秒快照').any():
         _src='⚡ Fugle 5秒快照＋盤中未完成日K'
-    elif (result['價格來源']=='官方日行情').any():
+    elif result['價格來源'].isin(['官方日行情','TWSE每日收盤行情']).any():
         _src='官方日行情'
     else:
         _src='Yahoo Finance 日K'
@@ -2520,4 +2591,4 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.4.3｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.4.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
