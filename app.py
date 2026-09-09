@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.5.4
-# V3.5.4：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.5
+# V3.5.5：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.5.4 Fugle 即時行情層
+# ⚡ V3.5.5 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2230,7 +2230,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.5.4 外資因子證明版 =====
+# ===== V3.5.5 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2420,7 +2420,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.5.4 外資最佳權重驗證 =====
+# ===== V3.5.5 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2464,7 +2464,146 @@ def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,
                     if len(tr)>=min_sample:rr.append({'最佳外資權重%':bestw,'門檻':th,'持有日':h,col:band,**_v353_metrics(tr,rc)})
         return pd.DataFrame(rr)
     return comp,s,hold,bands('外資連買區間'),bands('外資強度區間')
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.4｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.5.5 外資 Gate 驗證 =====
+# 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
+def _v355_gate_mask(z, gate_name):
+    fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
+    fi = pd.to_numeric(z['外資5日強度%'], errors='coerce')
+    if gate_name == '原技術訊號':
+        return pd.Series(True, index=z.index)
+    if gate_name == '外資買超第1天':
+        return fs == 1
+    if gate_name == '外資連買1-2天':
+        return (fs >= 1) & (fs <= 2)
+    if gate_name == '外資連買3-4天':
+        return (fs >= 3) & (fs <= 4)
+    if gate_name == '外資強度≥0.5%':
+        return fi >= 0.5
+    if gate_name == '外資強度≥1%':
+        return fi >= 1.0
+    if gate_name == '外資強度≥2%':
+        return fi >= 2.0
+    if gate_name == '連買1-2天＋強度≥1%':
+        return (fs >= 1) & (fs <= 2) & (fi >= 1.0)
+    if gate_name == '連買1-2天＋強度≥2%':
+        return (fs >= 1) & (fs <= 2) & (fi >= 2.0)
+    return pd.Series(False, index=z.index)
+
+def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
+                             horizons=(20,30,40), min_sample=30):
+    if event_base is None or event_base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    gates = [
+        '原技術訊號',
+        '外資買超第1天',
+        '外資連買1-2天',
+        '外資連買3-4天',
+        '外資強度≥0.5%',
+        '外資強度≥1%',
+        '外資強度≥2%',
+        '連買1-2天＋強度≥1%',
+        '連買1-2天＋強度≥2%',
+    ]
+
+    rows = []
+    z = event_base.copy()
+
+    for th in thresholds:
+        for h in horizons:
+            retcol = f'報酬{h}日%'
+            if retcol not in z.columns:
+                continue
+
+            base_candidates = z[pd.to_numeric(z['技術分數'], errors='coerce') >= th].copy()
+            base_trades = _v353_nonoverlap(base_candidates.assign(_score=z.loc[base_candidates.index,'技術分數']),
+                                           '_score', th, h)
+            base_m = _v353_metrics(base_trades, retcol)
+            base_n = max(int(base_m.get('樣本數',0)), 1)
+
+            for gate in gates:
+                g = base_candidates[_v355_gate_mask(base_candidates, gate)].copy()
+                if g.empty:
+                    continue
+                g['_score'] = g['技術分數']
+                tr = _v353_nonoverlap(g, '_score', th, h)
+
+                # 原技術訊號允許作為基準；Gate 組需達最低樣本
+                if gate != '原技術訊號' and len(tr) < min_sample:
+                    continue
+
+                m = _v353_metrics(tr, retcol)
+                yrs, ypos = _v353_year_stats(tr, retcol)
+
+                rows.append({
+                    'Gate': gate,
+                    '門檻': th,
+                    '持有日': h,
+                    **m,
+                    '訊號保留率%': (m['樣本數'] / base_n * 100) if base_n > 0 else np.nan,
+                    '勝率改善ppt': m['勝率%'] - base_m['勝率%'] if pd.notna(base_m['勝率%']) else np.nan,
+                    '平均報酬改善ppt': m['平均報酬%'] - base_m['平均報酬%'] if pd.notna(base_m['平均報酬%']) else np.nan,
+                    'PF改善': m['PF'] - base_m['PF'] if pd.notna(m['PF']) and pd.notna(base_m['PF']) else np.nan,
+                    '涵蓋年度數': yrs,
+                    '年度正報酬比例%': ypos,
+                })
+
+    grid = pd.DataFrame(rows)
+    if grid.empty:
+        return grid, pd.DataFrame()
+
+    test = grid[grid['Gate'] != '原技術訊號'].copy()
+    test['三項全改善'] = (
+        (test['勝率改善ppt'] > 0) &
+        (test['平均報酬改善ppt'] > 0) &
+        (test['PF改善'] > 0)
+    )
+    test['品質提升但不過濾過度'] = (
+        test['三項全改善'] &
+        (test['訊號保留率%'] >= 20)
+    )
+
+    summary = (
+        test.groupby('Gate', as_index=False)
+        .agg(
+            測試組合數=('Gate','size'),
+            三項全改善比例=('三項全改善', lambda s: s.mean()*100),
+            有效改善比例=('品質提升但不過濾過度', lambda s: s.mean()*100),
+            平均訊號保留率=('訊號保留率%','mean'),
+            平均勝率改善ppt=('勝率改善ppt','mean'),
+            平均報酬改善ppt=('平均報酬改善ppt','mean'),
+            平均PF改善=('PF改善','mean'),
+            平均樣本數=('樣本數','mean'),
+            平均CI下限=('95%CI下限%','mean'),
+        )
+    )
+
+    summary['通過Gate證據'] = (
+        (summary['三項全改善比例'] >= 60) &
+        (summary['平均勝率改善ppt'] > 0) &
+        (summary['平均報酬改善ppt'] > 0) &
+        (summary['平均PF改善'] > 0) &
+        (summary['平均訊號保留率'] >= 20)
+    )
+
+    summary['Gate證據分'] = (
+        summary['三項全改善比例'] * 0.08 +
+        summary['有效改善比例'] * 0.05 +
+        summary['平均勝率改善ppt'] * 1.0 +
+        summary['平均報酬改善ppt'] * 2.0 +
+        summary['平均PF改善'] * 5.0 +
+        np.clip(summary['平均CI下限'], -10, 10) * 0.25 -
+        np.where(summary['平均訊號保留率'] < 20, 5, 0)
+    )
+
+    summary = summary.sort_values(
+        ['通過Gate證據','Gate證據分','三項全改善比例'],
+        ascending=[False,False,False]
+    )
+    return grid, summary
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.5｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -2530,7 +2669,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.4｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.5｜精簡版：保留日常雷達功能＋外資 Gate 驗證；舊回測頁已清除，行情核心沿用 TWSE MI_INDEX＋Fugle/Yahoo 架構。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2641,7 +2780,14 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　KD K {r['K']:.1f} / D {r['D']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室','🧪 A2.4 籌碼回測','🩺 A2.4 籌碼策略健診','🧾 V3.5.4 外資因子證明','⚖️ V3.5.4 外資權重驗證'])
+t1,t2,t3,t4,t5,t6=st.tabs([
+    '📋 黑嚕嚕排行榜',
+    '🚨 訊號中心',
+    '📊 分數拆解',
+    '📈 個股分析',
+    '⭐ 自選股',
+    '🚪 外資 Gate 驗證'
+])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','日期檢查','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -2670,775 +2816,151 @@ with t5:
         q=result[result['股票'].isin(watch)].sort_values('黑嚕嚕分數',ascending=False)[['股票','名稱','價格','漲跌%','量比','K','D','黑嚕嚕分數','綜合分數','綜合等級','訊號']].copy();q['價格']=q['價格'].map(lambda x:f'{x:.2f}');q['漲跌%']=q['漲跌%'].map(lambda x:f'{x:+.2f}%');q['量比']=q['量比'].map(lambda x:f'{x:.2f}x');q['K']=q['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');q['D']=q['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');st.dataframe(q,use_container_width=True,hide_index=True)
 
 
+
 with t6:
-    st.subheader('🧪 V3.2 歷史訊號回測')
-    st.caption('研究型回測：訊號日收盤進場，持有 N 個交易日後以收盤價出場。未納入手續費、交易稅、滑價、漲跌停與流動性。')
-    c1,c2,c3=st.columns(3)
-    with c1:
-        bt_horizon=st.selectbox('持有交易日',[1,3,5,10,20],index=2)
-    with c2:
-        bt_gap=st.selectbox('同訊號冷卻天數',[0,3,5,10,20],index=1)
-    with c3:
-        bt_min_score=st.slider('回測最低黑嚕嚕分數',0,100,50,5)
-    bt_signals=st.multiselect('回測訊號',SIGNAL_LABELS,default=['🚀 強勢突破','🔥 主升段','🟢 守護生命線'])
-    bt_n=st.slider('回測股票數量',1,min(50,len(symbols)),min(20,len(symbols)),1)
-    if st.button('▶ 開始 V3.2 回測',type='primary'):
-        if not bt_signals:
-            st.warning('請至少選擇一個訊號。')
-        else:
-            all_events=[]; bt_progress=st.progress(0); bt_status=st.empty()
-            bt_symbols=symbols[:bt_n]
-            for i,sym in enumerate(bt_symbols):
-                bt_status.text(f'正在回測：{sym} {stock_name(sym)}　({i+1}/{len(bt_symbols)})')
-                bdf=get_stock_data(sym, market_map.get(sym))
-                if bdf is not None:
-                    ev=run_backtest(sym,bdf,bt_horizon,bt_gap,bt_signals,bt_min_score)
-                    if not ev.empty: all_events.append(ev)
-                bt_progress.progress((i+1)/max(len(bt_symbols),1))
-            bt_status.empty(); bt_progress.empty()
-            bt_result=pd.concat(all_events,ignore_index=True) if all_events else pd.DataFrame()
-            st.session_state['v32_bt_result']=bt_result
-            st.session_state['v32_bt_horizon']=bt_horizon
-    bt_result=st.session_state.get('v32_bt_result',pd.DataFrame())
-    if not bt_result.empty:
-        stats=overall_backtest_stats(bt_result)
-        c1,c2,c3,c4,c5=st.columns(5)
-        c1.metric('樣本數',stats['樣本數'])
-        c2.metric('勝率',f"{stats['勝率%']:.1f}%")
-        c3.metric('平均報酬',f"{stats['平均報酬%']:+.2f}%")
-        c4.metric('中位數',f"{stats['中位數報酬%']:+.2f}%")
-        c5.metric('報酬加總',f"{stats['報酬加總%']:+.2f}%")
-        st.markdown('### 📊 各訊號績效')
-        summary=backtest_summary(bt_result)
-        st.dataframe(summary.style.format({
-            '平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%','報酬加總%':'{:+.2f}%','勝率%':'{:.1f}%'
-        }),use_container_width=True,hide_index=True)
-        st.markdown('### 📈 平均報酬')
-        st.bar_chart(summary.set_index('訊號')['平均報酬%'])
-        st.markdown('### 🎯 勝率')
-        st.bar_chart(summary.set_index('訊號')['勝率%'])
-        st.markdown('### 🧾 歷史回測明細')
-        detail=bt_result.copy()
-        for col in ['進場價','出場價','報酬%','MFE%','MAE%','量比','K','D']:
-            if col in detail.columns: detail[col]=detail[col].round(2)
-        st.dataframe(detail,use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 匯出 V3.2 回測 CSV',bt_result.to_csv(index=False).encode('utf-8-sig'),'v3.2_backtest.csv','text/csv')
-    else:
-        st.info('尚未完成回測。請設定條件後按「▶ 開始 V3.2 回測」。')
+    st.subheader('🚪 V3.5.5 外資 Gate 驗證')
+    st.caption('已完成的舊回測頁已從主介面移除。現在只保留尚未定案的核心問題：外資是否適合當進場確認條件，而不是直接加權。')
 
-with t7:
-    st.subheader('🖤 A2 綜合選股分數回測')
-    st.caption('A2.2 基準：價格均線改 MA15；RSV 改為 9 日 KD（K/D）。歷史每日只用當天以前資料計分，訊號日收盤進場，N 個交易日後收盤出場。')
-    c1,c2,c3=st.columns(3)
-    with c1:a2_h=st.selectbox('A2 持有交易日',[1,3,5,10,20],index=2,key='a2_h')
-    with c2:a2_gap=st.selectbox('A2 冷卻天數',[0,3,5,10,20],index=1,key='a2_gap')
-    with c3:a2_min=st.slider('A2 最低綜合分數',0,100,70,5,key='a2_min')
-    a2_n=st.slider('A2 回測股票數',1,min(100,len(symbols)),min(30,len(symbols)),1,key='a2_n')
-    st.markdown('#### 📐 A2 固定權重')
-    wt_df=pd.DataFrame({'項目':list(COMPOSITE_WEIGHTS),'權重':[COMPOSITE_WEIGHTS[k] for k in COMPOSITE_WEIGHTS],'說明':[A2_COMPONENT_DESC[k] for k in COMPOSITE_WEIGHTS]})
-    st.dataframe(wt_df,use_container_width=True,hide_index=True)
-    if st.button('▶ 開始 A2 綜合分數回測',type='primary',key='run_a2'):
-        all_a2=[];pr=st.progress(0);ss=st.empty()
-        for i,sym in enumerate(symbols[:a2_n]):
-            ss.text(f'正在 A2 回測：{sym} {stock_name(sym)} ({i+1}/{a2_n})')
-            bdf=get_stock_data(sym,market_map.get(sym))
-            if bdf is not None:
-                ev=run_composite_backtest(sym,bdf,a2_h,a2_gap,a2_min)
-                if not ev.empty:all_a2.append(ev)
-            pr.progress((i+1)/max(a2_n,1))
-        ss.empty();pr.empty()
-        st.session_state['a2_bt']=pd.concat(all_a2,ignore_index=True) if all_a2 else pd.DataFrame()
-    a2=st.session_state.get('a2_bt',pd.DataFrame())
-    if not a2.empty:
-        rr=a2['報酬%'];c1,c2,c3,c4,c5=st.columns(5)
-        c1.metric('樣本數',len(rr));c2.metric('勝率',f'{(rr>0).mean()*100:.1f}%');c3.metric('平均報酬',f'{rr.mean():+.2f}%');c4.metric('中位數',f'{rr.median():+.2f}%');c5.metric('報酬加總',f'{rr.sum():+.2f}%')
-        sb=summarize_score_buckets(a2)
-        st.markdown('### 🎯 不同分數區間績效');st.dataframe(sb.style.format({'mean':'{:+.2f}%','median':'{:+.2f}%','sum':'{:+.2f}%','勝率%':'{:.1f}%'}),use_container_width=True,hide_index=True)
-        st.bar_chart(sb.set_index('分數區間')['mean'])
-        st.markdown('### 🧾 A2 回測明細');st.dataframe(a2.round(2),use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 匯出 A2 回測 CSV',a2.to_csv(index=False).encode('utf-8-sig'),'A2_composite_backtest.csv','text/csv',key='dl_a2')
-    else:st.info('尚未完成 A2 回測。請按「▶ 開始 A2 綜合分數回測」。若完全沒有樣本，請先把最低分數降到 60～65 測試。')
+    st.info(
+        '目前驗證方向：原技術100分不改，法人只當 Gate。'
+        '比較外資買超第1天、連買1-2天、連買3-4天，以及5日買超強度門檻。'
+    )
 
-    st.divider()
-    st.subheader('🧠 A2.1 綜合分數權重最佳化')
-    st.caption('A2.1 採有限、可解釋的權重候選；每檔股票依日期做 70% 訓練／30% 驗證，排序只看驗證集，避免把驗證資料拿來訓練。')
-    b1,b2,b3=st.columns(3)
-    with b1:a21_h=st.selectbox('A2.1 持有交易日',[1,3,5,10,20],index=2,key='a21_h')
-    with b2:a21_min=st.slider('A2.1 最低分數',50,90,70,5,key='a21_min')
-    with b3:a21_gap=st.selectbox('A2.1 冷卻天數',[0,3,5,10,20],index=1,key='a21_gap')
-    a21_n=st.slider('A2.1 股票數',1,min(100,len(symbols)),min(30,len(symbols)),1,key='a21_n')
-    if st.button('▶ 開始 A2.1 權重最佳化',type='primary',key='run_a21'):
-        pr=st.progress(0);ss=st.empty();hist=collect_a2_history(symbols[:a21_n],market_map,pr);ss.empty();pr.empty()
-        if hist.empty:
-            st.session_state['a21_rank']=pd.DataFrame();st.session_state['a21_all']=pd.DataFrame()
-        else:
-            top,all_rank=a21_optimize_weight_sets(hist,a21_h,a21_min,a21_gap,10)
-            st.session_state['a21_rank']=top;st.session_state['a21_all']=all_rank
-            st.session_state['a21_hist_n']=len(hist)
-    rank=st.session_state.get('a21_rank',pd.DataFrame())
-    if not rank.empty:
-        st.success(f"A2.1 完成：共建立 {st.session_state.get('a21_hist_n',0):,} 筆歷史樣本；以下為驗證集表現最佳的候選權重。")
-        st.markdown('### 🏆 A2.1 推薦權重')
-        best=rank.iloc[0]
-        best_df=pd.DataFrame({'項目':list(COMPOSITE_WEIGHTS),'原始權重':[COMPOSITE_WEIGHTS[k] for k in COMPOSITE_WEIGHTS],'推薦權重':[int(best[k]) for k in COMPOSITE_WEIGHTS],'差異':[int(best[k]-COMPOSITE_WEIGHTS[k]) for k in COMPOSITE_WEIGHTS],'說明':[A2_COMPONENT_DESC[k] for k in COMPOSITE_WEIGHTS]})
-        st.dataframe(best_df,use_container_width=True,hide_index=True)
-        st.metric('推薦權重總和',f"{sum(int(best[k]) for k in COMPOSITE_WEIGHTS)} / 100")
-        st.markdown('### 📊 A2.1 候選排名（驗證集）')
-        show=rank.copy();show['權重摘要']=show.apply(lambda r:' / '.join(f'{k}:{int(r[k])}' for k in COMPOSITE_WEIGHTS),axis=1)
-        show=show[['候選編號','樣本數','勝率%','平均報酬%','中位數報酬%','評分','權重摘要']]
-        st.dataframe(show.round(3),use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 匯出 A2.1 權重最佳化 CSV',st.session_state['a21_all'].to_csv(index=False).encode('utf-8-sig'),'A2.1_weight_optimization.csv','text/csv',key='dl_a21')
-    else:st.info('尚未完成 A2.1。請按「▶ 開始 A2.1 權重最佳化」。')
+    c1,c2,c3 = st.columns(3)
+    hist_days = c1.slider('法人歷史交易日數',120,260,220,20,key='v355_days')
+    min_sample = c2.slider('最低有效樣本數',20,120,30,10,key='v355_min')
+    max_events = c3.slider('每檔最多事件日',120,260,220,20,key='v355_events')
 
-with t8:
-    st.subheader('🩺 A2.2 策略健診｜MA15＋KD')
-    st.caption('先診斷，再調整權重。比較最低分數、持有交易日、分數×持有期，並拆解90分以上是否有追高／過熱現象。')
-    c1,c2,c3,c4=st.columns(4)
-    with c1:diag_h=st.selectbox('健診持有交易日',[1,3,5,10,20],index=2,key='diag_h')
-    with c2:diag_min=st.slider('健診最低分數',50,90,70,5,key='diag_min')
-    with c3:diag_gap=st.selectbox('健診冷卻交易日',[0,3,5,10,20],index=1,key='diag_gap')
-    with c4:diag_n=st.number_input('健診股票數',min_value=5,max_value=min(500,len(symbols)),value=min(30,len(symbols)),step=5,key='diag_n')
-    if st.button('▶ 執行 A2.2 策略健診',type='primary',key='run_a22'):
-        p=st.progress(0);msg=st.empty();hist=collect_a2_history(symbols[:int(diag_n)],market_map,p);p.empty();msg.empty();st.session_state['a22_hist']=prepare_diag_history(hist)
-    hist=st.session_state.get('a22_hist',pd.DataFrame())
-    if not hist.empty:
-        fmt={'勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%','報酬加總%':'{:+.2f}%','Profit Factor':'{:.2f}','Expectancy%':'{:+.2f}%','最大回撤%':'{:+.2f}%','平均獲利%':'{:+.2f}%','平均虧損%':'{:+.2f}%'}
-        st.markdown('### ① 最低分數門檻比較')
-        td=diagnostic_threshold_table(hist,diag_h,diag_gap);st.dataframe(td.style.format(fmt),use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 匯出門檻健診 CSV',td.to_csv(index=False).encode('utf-8-sig'),'A2.2_threshold.csv','text/csv',key='a22_dl1')
-        st.markdown('### ② 持有天數比較')
-        hd=diagnostic_horizon_table(hist,diag_min,diag_gap);st.dataframe(hd.style.format(fmt),use_container_width=True,hide_index=True)
-        st.bar_chart(hd.set_index('持有交易日')['平均報酬%'])
-        st.markdown('### ③ 分數 × 持有天數矩陣')
-        md=diagnostic_matrix(hist,diag_gap);pv=md.pivot(index='最低分數',columns='持有交易日',values='平均報酬%');st.dataframe(pv.style.format('{:+.2f}%'),use_container_width=True)
-        st.download_button('⬇️ 匯出分數×持有天數 CSV',md.to_csv(index=False).encode('utf-8-sig'),'A2.2_score_horizon.csv','text/csv',key='a22_dl2')
-        st.markdown('### ④ 90分以上過熱健診')
-        od=diagnostic_overheat(hist,90,diag_gap,diag_h)
-        if od.empty:st.info('目前90分以上樣本不足，先不要對90+下結論。')
-        else:st.dataframe(od.style.format(fmt),use_container_width=True,hide_index=True)
-        st.markdown('### ⑤ 健診摘要')
-        vt=td.dropna(subset=['平均報酬%']);vh=hd.dropna(subset=['平均報酬%']);a,b,c=st.columns(3)
-        if not vt.empty:z=vt.sort_values(['平均報酬%','Profit Factor'],ascending=False).iloc[0];a.metric('平均報酬最高門檻',f"≥{int(z['最低分數'])}分",f"{z['平均報酬%']:+.2f}%")
-        if not vh.empty:z=vh.sort_values(['平均報酬%','Profit Factor'],ascending=False).iloc[0];b.metric('平均報酬最高持有期',f"{int(z['持有交易日'])}日",f"{z['平均報酬%']:+.2f}%")
-        c.metric('歷史事件數',f"{len(hist):,}")
-        st.warning('研究性回測：目前股票池存在存活者偏差；歷史智能項目為OHLCV代理；未計手續費、交易稅、滑價與漲跌停。')
-    else:st.info('尚未完成 A2.2。建議先用20～30檔測試，確認流程後再擴大。')
+    thresholds = st.multiselect(
+        '技術分數門檻',
+        [70,75,80,85,90,95],
+        default=[75,80,85,90],
+        key='v355_thresholds'
+    )
+    horizons = st.multiselect(
+        '持有交易日',
+        [10,20,30,40],
+        default=[20,30,40],
+        key='v355_horizons'
+    )
 
+    if st.button('▶ 執行 V3.5.5 Gate 驗證', type='primary', key='run_v355'):
+        with st.spinner('建立法人歷史事件並比較各 Gate...'):
+            hist = load_twse_chip_history(hist_days)
+            base = collect_a242_event_base(result, hist, max_events)
 
-with t9:
-    st.subheader('🧪 A2.3.6 Strategy Lab Pro｜八策略公平 PK＋穩健度＋甜蜜區')
-    st.caption('同一批股票、同一段歷史、同一進出場規則，比較 MA15 / MA20 / MA30 / MA60 × RSI / KD。A2.3.5 再加入非重疊交易、年度拆解、樣本穩定度與真實資金曲線。')
-
-    st.markdown('### 🧬 本版比較的八套策略')
-    strategy_desc=pd.DataFrame([
-        {'策略':'MA15＋RSI','快均線':'MA15','動能':'RSI14','用途':'快速趨勢＋傳統動能'},
-        {'策略':'MA20＋RSI','快均線':'MA20','動能':'RSI14','用途':'短中期趨勢＋傳統動能'},
-        {'策略':'MA30＋RSI','快均線':'MA30','動能':'RSI14','用途':'中期趨勢＋傳統動能'},
-        {'策略':'MA60＋RSI','快均線':'MA60','動能':'RSI14','用途':'波段趨勢＋傳統動能'},
-        {'策略':'MA15＋KD','快均線':'MA15','動能':'9日KD','用途':'快速趨勢＋KD轉折'},
-        {'策略':'MA20＋KD','快均線':'MA20','動能':'9日KD','用途':'短中期趨勢＋KD轉折'},
-        {'策略':'MA30＋KD','快均線':'MA30','動能':'9日KD','用途':'中期趨勢＋KD轉折'},
-        {'策略':'MA60＋KD','快均線':'MA60','動能':'9日KD','用途':'波段趨勢＋KD轉折'}
-    ])
-    st.dataframe(strategy_desc,use_container_width=True,hide_index=True)
-    st.info('A2.3.5 已修正 MA60 評分公平性：不再使用 MA60>MA60 的不可能條件；MA200 生命線仍保留。')
-
-    a,b,c,d=st.columns(4)
-    with a:
-        a23_n=st.number_input('A2.3 股票數',min_value=5,max_value=min(300,len(symbols)),value=min(20,len(symbols)),step=5,key='a23_n')
-    with b:
-        a23_gap=st.selectbox('冷卻交易日',[0,3,5,10,20],index=1,key='a23_gap')
-    with c:
-        a23_min_samples=st.number_input('最低有效樣本數',min_value=5,max_value=500,value=20,step=5,key='a23_min_samples')
-    with d:
-        st.metric('策略組合','8 套')
-
-    a23_thresholds=st.multiselect('要比較的最低分數',[50,55,60,65,70,75,80,85,90],default=[65,70,75,80,85,90],key='a23_thresholds')
-    a23_horizons=st.multiselect('要比較的持有交易日',[1,3,5,10,20],default=[3,5,10,20],key='a23_horizons')
-
-    total_cases=max(len(a23_thresholds),1)*max(len(a23_horizons),1)*len(A23_STRATEGIES)
-    st.info(f'本次最多比較 {total_cases} 組條件。建議先用 20～30 檔確認流程，再逐步擴大股票數。')
-
-    if st.button('▶ 執行 A2.3 八策略 PK',type='primary',key='run_a23'):
-        if not a23_thresholds or not a23_horizons:
-            st.warning('最低分數與持有交易日都至少要選一個。')
-        else:
-            p=st.progress(0);status23=st.empty()
-            hist23=collect_strategy_lab_history(symbols[:int(a23_n)],market_map,p,status23)
-            p.empty();status23.empty()
-            if hist23.empty:
-                st.session_state['a23_hist']=pd.DataFrame()
-                st.session_state['a23_grid']=pd.DataFrame()
-                st.session_state['a23_band_grid']=pd.DataFrame()
-                st.session_state['a23_strategy_signature']=A23_STRATEGY_SIGNATURE
-            else:
-                grid23=strategy_lab_grid_pro(hist23,a23_thresholds,a23_horizons,int(a23_gap))
-                band23=strategy_lab_band_grid(hist23,a23_horizons,int(a23_gap))
-                st.session_state['a23_hist']=hist23
-                st.session_state['a23_grid']=grid23
-                st.session_state['a23_band_grid']=band23
-                st.session_state['a23_settings']={
-                    '股票數':int(a23_n),'冷卻':int(a23_gap),
-                    '門檻':list(a23_thresholds),'持有日':list(a23_horizons)
-                }
-                st.session_state['a23_strategy_signature']=A23_STRATEGY_SIGNATURE
-
-    # A2.3.6：避免 Streamlit 沿用舊版四策略 session_state。
-    # 若策略集合有變更，就自動清除舊 A2.3 回測結果，要求重新執行。
-    saved_sig=st.session_state.get('a23_strategy_signature')
-    if saved_sig is not None and saved_sig != A23_STRATEGY_SIGNATURE:
-        for _k in ['a23_hist','a23_grid','a23_band_grid','a23_settings',
-                   'a235_nonoverlap','a235_yearly','a235_size',
-                   'a235_equity','a235_trades','a235_port_stats']:
-            st.session_state.pop(_k,None)
-
-    grid23=st.session_state.get('a23_grid',pd.DataFrame())
-    hist23=st.session_state.get('a23_hist',pd.DataFrame())
-    band23=st.session_state.get('a23_band_grid',pd.DataFrame())
-
-    if not grid23.empty:
-        fmt23={'勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
-               '報酬加總%':'{:+.2f}%','Profit Factor':'{:.2f}','Expectancy%':'{:+.2f}%',
-               '最大回撤%':'{:+.2f}%','平均獲利%':'{:+.2f}%','平均虧損%':'{:+.2f}%'}
-
-        st.markdown('### 🏆 ① 八策略最佳組合')
-        sm23=strategy_lab_summary(grid23,int(a23_min_samples))
-        if sm23.empty or sm23['平均報酬%'].notna().sum()==0:
-            st.warning('目前沒有任何組合達到最低有效樣本數。可降低「最低有效樣本數」或增加回測股票數。')
-        else:
-            st.dataframe(sm23.style.format({
-                '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
-                'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-            }),use_container_width=True,hide_index=True)
-            winner=sm23.dropna(subset=['平均報酬%']).iloc[0]
-            c1,c2,c3,c4=st.columns(4)
-            c1.metric('目前冠軍',winner['策略'])
-            c2.metric('最佳最低分數',f"≥{int(winner['最佳最低分數'])} 分")
-            c3.metric('最佳持有期',f"{int(winner['最佳持有日'])} 日")
-            c4.metric('平均報酬',f"{winner['平均報酬%']:+.2f}%",f"PF {winner['Profit Factor']:.2f}")
-
-        st.markdown('### 🥇 ② 全條件排行榜')
-        rank23=strategy_lab_rank(grid23,int(a23_min_samples))
-        if rank23.empty:
-            st.info('沒有達到最低樣本數的有效組合。')
-        else:
-            cols23=['排名','策略','最低分數','持有交易日','樣本數','勝率%','平均報酬%','中位數報酬%','Profit Factor','最大回撤%','平均獲利%','平均虧損%']
-            st.dataframe(rank23[cols23].head(30).style.format(fmt23),use_container_width=True,hide_index=True)
-
-        st.markdown('### 🗺️ ③ 策略 × 分數 × 持有期矩陣')
-        metric23=st.selectbox('矩陣顯示指標',['平均報酬%','勝率%','Profit Factor','最大回撤%','樣本數'],index=0,key='a23_metric')
-        strategy23=st.selectbox('查看策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋KD'),key='a23_strategy_view')
-        sub23=grid23[grid23['策略']==strategy23]
-        if not sub23.empty:
-            pv23=sub23.pivot(index='最低分數',columns='持有交易日',values=metric23)
-            if metric23 in ['平均報酬%','最大回撤%']:
-                st.dataframe(pv23.style.format('{:+.2f}%'),use_container_width=True)
-            elif metric23=='勝率%':
-                st.dataframe(pv23.style.format('{:.1f}%'),use_container_width=True)
-            elif metric23=='Profit Factor':
-                st.dataframe(pv23.style.format('{:.2f}'),use_container_width=True)
-            else:
-                st.dataframe(pv23.style.format('{:.0f}'),use_container_width=True)
-
-        st.markdown('### 📊 ④ 八策略在相同條件下直接 PK')
-        q1,q2=st.columns(2)
-        with q1:
-            common_th=st.selectbox('固定最低分數',sorted(grid23['最低分數'].unique().tolist()),index=0,key='a23_common_th')
-        with q2:
-            common_h=st.selectbox('固定持有日',sorted(grid23['持有交易日'].unique().tolist()),index=0,key='a23_common_h')
-        direct=grid23[(grid23['最低分數']==common_th)&(grid23['持有交易日']==common_h)].copy()
-        direct=direct.sort_values(['平均報酬%','Profit Factor'],ascending=False)
-        st.dataframe(direct[['策略','樣本數','勝率%','平均報酬%','中位數報酬%','Profit Factor','最大回撤%']].style.format(fmt23),use_container_width=True,hide_index=True)
-        if not direct.empty:
-            st.bar_chart(direct.set_index('策略')['平均報酬%'])
-
-
-        st.markdown('### 🛡️ ⑤ A2.3.2 穩健度排名｜加入 95% 信賴區間')
-        robust23=strategy_lab_robust_rank(grid23,int(a23_min_samples))
-        if robust23.empty:
-            st.info('目前沒有足夠樣本可做穩健排名。')
-        else:
-            robust_cols=[
-                '穩健排名','穩健候選','策略','最低分數','持有交易日','樣本數',
-                '勝率%','平均報酬%','平均報酬95%CI下限','平均報酬95%CI上限',
-                'Profit Factor','最大回撤%'
-            ]
-            st.dataframe(
-                robust23[robust_cols].head(30).style.format({
-                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
-                    '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
-                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-                }),
-                use_container_width=True,hide_index=True
-            )
-            robust_ok=robust23[robust23['穩健候選']=='✅']
-            if not robust_ok.empty:
-                rb=robust_ok.iloc[0]
-                st.success(
-                    f"目前較穩健候選：{rb['策略']}｜最低 {int(rb['最低分數'])} 分｜"
-                    f"持有 {int(rb['持有交易日'])} 日｜平均 {rb['平均報酬%']:+.2f}%｜"
-                    f"95% CI 下限 {rb['平均報酬95%CI下限']:+.2f}%｜PF {rb['Profit Factor']:.2f}"
-                )
-            else:
-                st.warning('目前沒有組合的「平均報酬 95% CI 下限 > 0」。這不代表策略無效，但代表證據還不夠穩健，建議增加股票數與樣本。')
-
-        st.markdown('### 🎯 ⑥ 真正分數甜蜜區｜70–74、75–79、80–84 分開看')
-        if band23 is None or band23.empty:
-            st.info('尚無分數區間資料，請重新執行 A2.3。')
-        else:
-            sweet23=strategy_lab_band_summary(band23,int(a23_min_samples))
-            if sweet23.empty:
-                st.info('目前各分數區間樣本不足。')
-            else:
-                st.dataframe(
-                    sweet23.style.format({
-                        '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
-                        '95%CI下限':'{:+.2f}%','95%CI上限':'{:+.2f}%',
-                        'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-                    }),
-                    use_container_width=True,hide_index=True
-                )
-
-            b1,b2=st.columns(2)
-            with b1:
-                band_strategy=st.selectbox('甜蜜區策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋KD'),key='a232_band_strategy')
-            with b2:
-                band_horizon=st.selectbox('甜蜜區持有日',sorted(band23['持有交易日'].dropna().unique().tolist()),key='a232_band_horizon')
-            view_band=band23[(band23['策略']==band_strategy)&(band23['持有交易日']==band_horizon)].copy()
-            order_map={v:i for i,v in enumerate(A232_SCORE_LABELS)}
-            view_band['_order']=view_band['分數區間'].map(order_map)
-            view_band=view_band.sort_values('_order').drop(columns=['_order'])
-            if not view_band.empty:
-                st.dataframe(
-                    view_band[['分數區間','樣本數','勝率%','平均報酬%','平均報酬95%CI下限',
-                               '平均報酬95%CI上限','Profit Factor','最大回撤%']].style.format({
-                        '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
-                        '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
-                        'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-                    }),
-                    use_container_width=True,hide_index=True
-                )
-                st.bar_chart(view_band.set_index('分數區間')['平均報酬%'])
-
-
-        st.markdown('### 🧱 ⑦ A2.3.5 非重疊交易驗證')
-        st.caption('持有 20 日時，同一股票這 20 日內不再重複計入新訊號，避免同一波上漲被重複算很多次。')
-        if st.button('▶ 執行 A2.3.5 可靠度驗證',key='run_a235_reliability'):
-            non23=strategy_lab_grid_nonoverlap(hist23,a23_thresholds,a23_horizons,int(a23_gap))
-            year23=strategy_lab_yearly_nonoverlap(hist23,a23_thresholds,a23_horizons,int(a23_gap))
-            size23=strategy_lab_size_stability(hist23,a23_thresholds,a23_horizons,int(a23_gap))
-            st.session_state['a235_nonoverlap']=non23
-            st.session_state['a235_yearly']=year23
-            st.session_state['a235_size']=size23
-
-        non23=st.session_state.get('a235_nonoverlap',pd.DataFrame())
-        year23=st.session_state.get('a235_yearly',pd.DataFrame())
-        size23=st.session_state.get('a235_size',pd.DataFrame())
-
-        if not non23.empty:
-            nr=strategy_lab_robust_rank(non23,int(a23_min_samples))
-            if not nr.empty:
-                cols_nr=['穩健排名','穩健候選','策略','最低分數','持有交易日','樣本數',
-                         '勝率%','平均報酬%','平均報酬95%CI下限','Profit Factor','最大回撤%']
-                st.dataframe(nr[cols_nr].head(30).style.format({
-                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%',
-                    '平均報酬95%CI下限':'{:+.2f}%','Profit Factor':'{:.2f}',
-                    '最大回撤%':'{:+.2f}%'
-                }),use_container_width=True,hide_index=True)
-
-        st.markdown('### 📅 ⑧ 年度拆解｜看策略是不是只在某一年有效')
-        if not year23.empty:
-            ystrategy=st.selectbox('年度拆解策略',list(A23_STRATEGIES.keys()),key='a235_year_strategy')
-            yth=st.selectbox('年度拆解最低分數',sorted(year23['最低分數'].unique().tolist()),key='a235_year_th')
-            yh=st.selectbox('年度拆解持有日',sorted(year23['持有交易日'].unique().tolist()),key='a235_year_h')
-            yv=year23[(year23['策略']==ystrategy)&(year23['最低分數']==yth)&(year23['持有交易日']==yh)].copy()
-            if not yv.empty:
-                st.dataframe(yv[['年度','樣本數','勝率%','平均報酬%','中位數報酬%','平均報酬95%CI下限',
-                                  '平均報酬95%CI上限','Profit Factor','最大回撤%']].style.format({
-                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','中位數報酬%':'{:+.2f}%',
-                    '平均報酬95%CI下限':'{:+.2f}%','平均報酬95%CI上限':'{:+.2f}%',
-                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-                }),use_container_width=True,hide_index=True)
-        else:
-            st.info('先執行上方「A2.3.5 可靠度驗證」，才會建立年度拆解。')
-
-        st.markdown('### 📐 ⑨ 股票數穩定度｜50 → 100 → 200 → 300')
-        if not size23.empty:
-            sstrategy=st.selectbox('穩定度策略',list(A23_STRATEGIES.keys()),key='a235_size_strategy')
-            sth=st.selectbox('穩定度最低分數',sorted(size23['最低分數'].unique().tolist()),key='a235_size_th')
-            sh=st.selectbox('穩定度持有日',sorted(size23['持有交易日'].unique().tolist()),key='a235_size_h')
-            sv=size23[(size23['策略']==sstrategy)&(size23['最低分數']==sth)&(size23['持有交易日']==sh)].copy()
-            if not sv.empty:
-                st.dataframe(sv[['股票數','樣本數','勝率%','平均報酬%','平均報酬95%CI下限','Profit Factor','最大回撤%']].style.format({
-                    '勝率%':'{:.1f}%','平均報酬%':'{:+.2f}%','平均報酬95%CI下限':'{:+.2f}%',
-                    'Profit Factor':'{:.2f}','最大回撤%':'{:+.2f}%'
-                }),use_container_width=True,hide_index=True)
-                st.line_chart(sv.set_index('股票數')[['平均報酬%','勝率%']])
-        else:
-            st.info('先執行上方「A2.3.5 可靠度驗證」。若本次只回測 100 檔，就只能比較 50 / 100。')
-
-        st.markdown('### 💰 ⑩ 真實資金曲線｜Portfolio MDD')
-        st.caption('這裡的最大回撤才是依每日總資產計算的 Portfolio MDD；與前面逐筆交易序列的「最大回撤」意義不同。')
-        pc1,pc2,pc3,pc4=st.columns(4)
-        with pc1:
-            p_strategy=st.selectbox('資金曲線策略',list(A23_STRATEGIES.keys()),index=list(A23_STRATEGIES.keys()).index('MA15＋RSI'),key='a235_p_strategy')
-            p_score=st.selectbox('進場最低分數',[65,70,75,80,85,90],index=4,key='a235_p_score')
-        with pc2:
-            p_horizon=st.selectbox('持有交易日',[3,5,10,20],index=3,key='a235_p_horizon')
-            p_capital=st.number_input('起始本金',min_value=100000,max_value=100000000,value=1000000,step=100000,key='a235_p_capital')
-        with pc3:
-            p_maxpos=st.number_input('最多同時持股',min_value=1,max_value=30,value=10,step=1,key='a235_p_maxpos')
-            p_pct=st.number_input('單檔目標配置%',min_value=1.0,max_value=100.0,value=10.0,step=1.0,key='a235_p_pct')
-        with pc4:
-            p_fee=st.number_input('單邊手續費%',min_value=0.0,max_value=1.0,value=0.1425,step=0.01,format='%.4f',key='a235_p_fee')
-            p_tax=st.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='a235_p_tax')
-            p_slip=st.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='a235_p_slip')
-
-        if st.button('▶ 執行真實資金曲線',type='primary',key='run_a235_portfolio'):
-            eq23,tr23,ps23=run_a235_portfolio(
-                hist23,p_strategy,p_score,p_horizon,p_capital,p_maxpos,p_pct,
-                p_fee,p_tax,p_slip,int(a23_gap)
-            )
-            st.session_state['a235_equity']=eq23
-            st.session_state['a235_trades']=tr23
-            st.session_state['a235_port_stats']=ps23
-
-        eq23=st.session_state.get('a235_equity',pd.DataFrame())
-        tr23=st.session_state.get('a235_trades',pd.DataFrame())
-        ps23=st.session_state.get('a235_port_stats',{})
-
-        if ps23:
-            m1,m2,m3,m4=st.columns(4)
-            m1.metric('期末資產',f"${ps23['期末資產']:,.0f}")
-            m2.metric('總報酬',f"{ps23['總報酬%']:+.2f}%")
-            m3.metric('年化報酬',f"{ps23['年化報酬%']:+.2f}%")
-            m4.metric('Portfolio MDD',f"{ps23['最大回撤%']:+.2f}%")
-            m5,m6,m7,m8=st.columns(4)
-            m5.metric('完成交易',f"{ps23['完成交易']:,}")
-            m6.metric('勝率',f"{ps23['勝率%']:.1f}%" if pd.notna(ps23['勝率%']) else '—')
-            m7.metric('平均每筆',f"{ps23['平均每筆%']:+.2f}%" if pd.notna(ps23['平均每筆%']) else '—')
-            m8.metric('Profit Factor',f"{ps23['Profit Factor']:.2f}" if pd.notna(ps23['Profit Factor']) else '—')
-            if not eq23.empty:
-                st.line_chart(eq23.set_index('日期')['總資產'])
-                st.area_chart(eq23.set_index('日期')['回撤%'])
-            if not tr23.empty:
-                st.dataframe(tr23.tail(100).style.format({
-                    '進場分數':'{:.1f}','買進成本':'{:,.0f}','賣出淨收入':'{:,.0f}',
-                    '損益':'{:+,.0f}','報酬%':'{:+.2f}%'
-                }),use_container_width=True,hide_index=True)
-                st.download_button('⬇️ 匯出 Portfolio 交易紀錄',
-                                   tr23.to_csv(index=False).encode('utf-8-sig'),
-                                   'A2.3.5_portfolio_trades.csv','text/csv',key='a235_dl_trades')
-                st.download_button('⬇️ 匯出 Portfolio 每日淨值',
-                                   eq23.to_csv(index=False).encode('utf-8-sig'),
-                                   'A2.3.5_portfolio_equity.csv','text/csv',key='a235_dl_equity')
-
-        st.markdown('### 🔬 ⑪ 研究結論提醒')
-        st.write('A2.3.5 先用非重疊交易、年度拆解、股票數穩定度與 Portfolio MDD 驗證，再決定 MA15/20/30/60 × RSI/KD 哪套值得定版。')
-        st.warning('A2.3.5 仍屬研究性回測：股票池仍可能有存活者偏差，OHLCV 智能四項仍是歷史代理；Portfolio 已可計費用/稅/滑價與部位，但仍未模擬漲跌停、整張/零股成交限制與真實委託撮合。')
-
-        st.download_button('⬇️ 匯出 A2.3 全策略比較 CSV',
-                           grid23.to_csv(index=False).encode('utf-8-sig'),
-                           'A2.3_strategy_lab_grid.csv','text/csv',key='a23_dl_grid')
-        if not hist23.empty:
-            st.download_button('⬇️ 匯出 A2.3 歷史分數明細 CSV',
-                               hist23.to_csv(index=False).encode('utf-8-sig'),
-                               'A2.3_strategy_lab_history.csv','text/csv',key='a23_dl_hist')
-        if band23 is not None and not band23.empty:
-            st.download_button('⬇️ 匯出 A2.3.3 分數甜蜜區 CSV',
-                               band23.to_csv(index=False).encode('utf-8-sig'),
-                               'A2.3.3_score_band_analysis.csv','text/csv',key='a232_dl_band')
-    else:
-        st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
-
-
-st.divider();st.caption('🖤 黑嚕嚕 V3.5.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
-
-with t10:
-    st.subheader('🏦 A2.4 籌碼實驗室｜C版')
-    st.caption('同時測：外資/投信連續買賣天數＋近5日淨買賣超＋近5日買超強度。先研究，不直接改原100分。')
-    st.info('第一階段先接 TWSE 官方 T86 上市股票。上櫃/興櫃下一階段再接 TPEx，避免不同市場資料格式混算。')
-    c1,c2,c3=st.columns(3);days=c1.slider('法人歷史交易日',10,30,15,key='chip_days');min_streak=c2.slider('連買門檻',1,10,3,key='chip_streak');min_int=c3.number_input('5日買超強度門檻 %',value=0.5,step=0.1,key='chip_int')
-    if st.button('▶ 載入 A2.4 籌碼資料',type='primary',key='run_chip'):
-        with st.spinner('讀取 TWSE T86 並計算籌碼因子...'):
-            hist=load_twse_chip_history(days);pmap={str(r['股票']).zfill(4):r['_df'] for _,r in result.iterrows()};st.session_state['chip_features']=chip_features(hist,pmap)
-    cf=st.session_state.get('chip_features',pd.DataFrame())
-    if cf is not None and not cf.empty:
-        v=result[['股票','名稱','市場','價格','綜合分數']].copy();v['股票']=v['股票'].astype(str).str.zfill(4);v=v.merge(cf,on='股票',how='left');v['籌碼訊號']=v.apply(chip_signal_label,axis=1)
-        v['C版候選']=(((v['外資連買賣天數'].fillna(0)>=min_streak)|(v['投信連買賣天數'].fillna(0)>=min_streak))&((v['外資5日強度%'].fillna(0)>=min_int)|(v['投信5日強度%'].fillna(0)>=min_int)))
-        st.dataframe(v.sort_values(['C版候選','籌碼研究分','綜合分數'],ascending=[False,False,False]),use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 下載 A2.4 C版結果',v.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_lab_C.csv','text/csv')
-        st.markdown('#### 下一階段正式PK');st.write('① 原100分　② 技術90%＋外資5%＋投信5%　③ 技術85%＋外資5%＋投信10%　④ 技術80%＋外資10%＋投信10%。')
-        st.warning('目前籌碼研究分只用於排序。下一版把法人歷史資料對齊每個訊號日，再跑非重疊交易、年度拆解、PF、Portfolio MDD，才決定正式權重。')
-    else:st.write('按「載入 A2.4 籌碼資料」開始。')
-
-with t11:
-    st.subheader('🧪 A2.4 籌碼歷史回測｜四模型 PK')
-    st.caption('比較原100分 vs 三種法人權重。先看是否真的提升勝率、平均報酬、PF與年度穩定度。')
-    c1,c2,c3=st.columns(3)
-    bt_days=c1.slider('法人回測交易日數',20,120,60,10,key='a24_bt_days')
-    bt_score=c2.slider('進場分數門檻',70,95,85,5,key='a24_bt_score')
-    bt_horizon=c3.selectbox('持有交易日',[5,10,20],index=2,key='a24_bt_horizon')
-    if st.button('▶ 執行 A2.4 四模型回測',type='primary',key='run_a24_bt'):
-        with st.spinner('載入歷史法人資料並執行四模型回測...'):
-            hist=load_twse_chip_history(bt_days)
-            trades,summary=run_a24_chip_backtest(result,hist,bt_score,bt_horizon,bt_horizon)
-            st.session_state['a24_trades']=trades;st.session_state['a24_summary']=summary
-    summary=st.session_state.get('a24_summary',pd.DataFrame())
-    trades=st.session_state.get('a24_trades',pd.DataFrame())
-    if summary is not None and not summary.empty:
-        st.markdown('#### 📊 四模型績效總表')
-        st.dataframe(summary,use_container_width=True,hide_index=True)
-        # 基準差異
-        base=summary[summary['模型'].astype(str)=='原100分']
-        if not base.empty:
-            b=base.iloc[0]
-            comp=summary.copy()
-            comp['勝率改善ppt']=comp['勝率%']-b['勝率%']
-            comp['平均報酬改善ppt']=comp['平均報酬%']-b['平均報酬%']
-            comp['PF改善']=comp['PF']-b['PF']
-            st.markdown('#### 🔍 相對原100分改善幅度')
-            st.dataframe(comp[['模型','勝率改善ppt','平均報酬改善ppt','PF改善','年度正報酬比例%']],use_container_width=True,hide_index=True)
-        st.download_button('⬇️ 下載 A2.4 回測交易明細',trades.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_backtest_trades.csv','text/csv')
-        st.download_button('⬇️ 下載 A2.4 四模型總表',summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_backtest_summary.csv','text/csv')
-        st.info('判讀原則：若法人模型在「勝率、平均報酬、PF、年度正報酬比例」至少3項同時優於原100分，再考慮正式納入主分數。')
-    else:
-        st.write('按「執行 A2.4 四模型回測」開始比較。')
-
-with t12:
-    st.subheader('🩺 A2.4 籌碼策略健診｜V3.5.4')
-    st.caption('一次交叉測試：門檻 × 持有期 × 外資/投信權重 × 連買天數，並設定最低樣本數，避免小樣本假冠軍。')
-
-    c1,c2,c3=st.columns(3)
-    hist_days=c1.slider('法人歷史交易日數',60,180,120,20,key='a242_days')
-    min_sample=c2.slider('最低有效樣本數',20,200,50,10,key='a242_min_sample')
-    max_events=c3.slider('每檔最多法人事件日',60,180,140,20,key='a242_max_events')
-
-    thresholds=st.multiselect('分數門檻',[70,75,80,85,90,95],default=[75,80,85,90],key='a242_thresholds')
-    horizons=st.multiselect('持有交易日',[5,10,20,30],default=[5,10,20,30],key='a242_horizons')
-
-    if st.button('▶ 執行 V3.5.4 籌碼策略健診',type='primary',key='run_a242'):
-        with st.spinner('建立法人×技術歷史事件底表，執行多參數敏感度測試...'):
-            hist=load_twse_chip_history(hist_days)
-            base=collect_a242_event_base(result,hist,max_events)
-            comp,rank=run_a242_diagnostic(base,tuple(thresholds),tuple(horizons),min_sample,(0,3,5))
-            st.session_state['a242_base']=base
-            st.session_state['a242_comp']=comp
-            st.session_state['a242_rank']=rank
-
-    comp=st.session_state.get('a242_comp',pd.DataFrame())
-    rank=st.session_state.get('a242_rank',pd.DataFrame())
-
-    if rank is not None and not rank.empty:
-        st.markdown('### 🏆 籌碼模型穩健度 Top 20')
-        topcols=['模型','門檻','持有日','連買條件','連買天數','樣本數','勝率%','平均報酬%','PF',
-                 '勝率改善ppt','平均報酬改善ppt','PF改善','95%CI下限%','年度正報酬比例%','穩健度分數']
-        st.dataframe(rank[topcols].head(20),use_container_width=True,hide_index=True)
-
-        st.markdown('### 🧬 各模型最佳組合')
-        best_each=(rank.sort_values(['模型','穩健度分數'],ascending=[True,False])
-                   .groupby('模型',as_index=False).first())
-        st.dataframe(best_each[topcols],use_container_width=True,hide_index=True)
-
-        st.markdown('### 🔎 外資 vs 投信 vs 雙法人')
-        factor_summary=(rank.groupby('模型',as_index=False)
-                        .agg(測試組合數=('模型','size'),
-                             平均勝率改善ppt=('勝率改善ppt','mean'),
-                             平均報酬改善ppt=('平均報酬改善ppt','mean'),
-                             平均PF改善=('PF改善','mean'),
-                             正改善組合比例=('平均報酬改善ppt',lambda s:(s>0).mean()*100)))
-        st.dataframe(factor_summary.sort_values('平均報酬改善ppt',ascending=False),
-                     use_container_width=True,hide_index=True)
-
-        st.markdown('### 📅 持有期敏感度')
-        hold=(rank.groupby(['模型','持有日'],as_index=False)
-              .agg(平均勝率改善ppt=('勝率改善ppt','mean'),
-                   平均報酬改善ppt=('平均報酬改善ppt','mean'),
-                   平均PF改善=('PF改善','mean'),
-                   平均樣本數=('樣本數','mean')))
-        st.dataframe(hold.sort_values(['模型','平均報酬改善ppt'],ascending=[True,False]),
-                     use_container_width=True,hide_index=True)
-
-        st.markdown('### 🔢 連買天數敏感度')
-        streak=(rank.groupby(['模型','連買條件','連買天數'],as_index=False)
-                .agg(平均勝率改善ppt=('勝率改善ppt','mean'),
-                     平均報酬改善ppt=('平均報酬改善ppt','mean'),
-                     平均PF改善=('PF改善','mean'),
-                     平均樣本數=('樣本數','mean')))
-        st.dataframe(streak.sort_values('平均報酬改善ppt',ascending=False),
-                     use_container_width=True,hide_index=True)
-
-        st.download_button('⬇️ 下載 V3.5.4 全部敏感度結果',
-            comp.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.4_chip_diagnostic_all.csv','text/csv',key='dl_a242_all')
-        st.download_button('⬇️ 下載 V3.5.4 穩健度排名',
-            rank.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.4_chip_diagnostic_rank.csv','text/csv',key='dl_a242_rank')
-
-        st.info('判讀建議：不要只看第1名。優先選擇「多個門檻、多個持有期都保持正改善」的模型；若只有單一條件特別強，先視為過度擬合候選。')
-    else:
-        st.write('設定條件後按「執行 V3.5.4 籌碼策略健診」。')
-
-with t13:
-    st.subheader('🧾 V3.5.4 外資因子證明')
-    st.caption('目標不是找單一冠軍，而是證明「外資5%」是否跨門檻、跨持有期、跨連買/強度區間仍穩定優於原100分。')
-
-    c1,c2,c3=st.columns(3)
-    hist_days=c1.slider('法人歷史交易日數',100,260,180,20,key='v353_days')
-    min_sample=c2.slider('最低有效樣本數',20,150,40,10,key='v353_min_sample')
-    max_events=c3.slider('每檔最多事件日',100,260,180,20,key='v353_max_events')
-
-    thresholds=st.multiselect('分數門檻',[70,75,80,85,90,95],
-                              default=[75,80,85,90],key='v353_thresholds')
-    horizons=st.multiselect('持有交易日',[10,20,30,40],
-                            default=[20,30,40],key='v353_horizons')
-
-    if st.button('▶ 執行 V3.5.4 外資因子證明',type='primary',key='run_v353'):
-        with st.spinner('建立較長法人事件底表並驗證外資因子...'):
-            hist=load_twse_chip_history(hist_days)
-            base=collect_a242_event_base(result,hist,max_events)
-
-            # V3.5.2 原本只有到30日，這裡補40日 forward return
+            # 補40日報酬
             if base is not None and not base.empty and 40 in horizons and '報酬40日%' not in base.columns:
-                # 重建40日報酬需要逐檔歷史價格
-                price_maps={}
-                for _,rr in result.iterrows():
-                    code=str(rr['股票']).zfill(4)
-                    df=rr.get('_df')
+                pmap = {}
+                for _, rr in result.iterrows():
+                    code = str(rr['股票']).zfill(4)
+                    df = rr.get('_df')
                     if df is not None and not df.empty:
-                        x=df.copy()
-                        x.index=pd.to_datetime(x.index).tz_localize(None).normalize()
-                        price_maps[code]=x
-                vals=[]
-                for _,r in base.iterrows():
-                    code=str(r['股票']).zfill(4);dt=pd.Timestamp(r['日期']).normalize()
-                    df=price_maps.get(code)
-                    val=np.nan
+                        x = df.copy()
+                        x.index = pd.to_datetime(x.index).tz_localize(None).normalize()
+                        pmap[code] = x
+
+                vals = []
+                for _, r in base.iterrows():
+                    code = str(r['股票']).zfill(4)
+                    dt = pd.Timestamp(r['日期']).normalize()
+                    df = pmap.get(code)
+                    v = np.nan
                     if df is not None and dt in df.index:
-                        pos=df.index.get_loc(dt)
-                        if isinstance(pos,(int,np.integer)) and pos+40<len(df):
-                            p0=float(df['Close'].iloc[pos]);p1=float(df['Close'].iloc[pos+40])
-                            val=(p1/p0-1)*100
-                    vals.append(val)
-                base['報酬40日%']=vals
+                        pos = df.index.get_loc(dt)
+                        if isinstance(pos,(int,np.integer)) and pos + 40 < len(df):
+                            p0 = float(df['Close'].iloc[pos])
+                            p1 = float(df['Close'].iloc[pos+40])
+                            v = (p1/p0 - 1) * 100
+                    vals.append(v)
+                base['報酬40日%'] = vals
 
-            grid,ms,streak_df,intensity_df=run_v353_foreign_proof(
-                base,tuple(thresholds),tuple(horizons),min_sample
+            grid, summary = run_v355_gate_validation(
+                base,
+                tuple(thresholds),
+                tuple(horizons),
+                min_sample
             )
-            st.session_state['v353_grid']=grid
-            st.session_state['v353_model_summary']=ms
-            st.session_state['v353_streak']=streak_df
-            st.session_state['v353_intensity']=intensity_df
+            st.session_state['v355_grid'] = grid
+            st.session_state['v355_summary'] = summary
 
-    grid=st.session_state.get('v353_grid',pd.DataFrame())
-    ms=st.session_state.get('v353_model_summary',pd.DataFrame())
-    streak_df=st.session_state.get('v353_streak',pd.DataFrame())
-    intensity_df=st.session_state.get('v353_intensity',pd.DataFrame())
+    grid = st.session_state.get('v355_grid', pd.DataFrame())
+    summary = st.session_state.get('v355_summary', pd.DataFrame())
 
-    if ms is not None and not ms.empty:
-        st.markdown('### 🥇 候選模型跨參數穩健度')
-        st.dataframe(ms,use_container_width=True,hide_index=True)
+    if summary is not None and not summary.empty:
+        st.markdown('### 🏆 Gate 證據排名')
+        st.dataframe(summary, use_container_width=True, hide_index=True)
 
-        st.markdown('### 🎯 最值得注意：三項全改善比例')
-        best=ms.iloc[0]
-        st.metric('目前跨參數第一名',str(best['模型']))
-        st.metric('勝率＋平均報酬＋PF 同時改善比例',f"{best['三項全改善比例']:.1f}%")
-        st.caption('如果 A 技術95＋外資5 能在大多數參數組合同時改善三項核心指標，才算真正有資格進入主策略。')
+        best = summary.iloc[0]
+        st.metric('目前最佳 Gate', str(best['Gate']))
+        st.metric('三項全改善比例', f"{best['三項全改善比例']:.1f}%")
+        st.metric('平均訊號保留率', f"{best['平均訊號保留率']:.1f}%")
+
+        st.write(
+            f"平均勝率改善 **{best['平均勝率改善ppt']:+.3f} ppt** ｜ "
+            f"平均報酬改善 **{best['平均報酬改善ppt']:+.3f} ppt** ｜ "
+            f"平均PF改善 **{best['平均PF改善']:+.3f}**"
+        )
 
         if grid is not None and not grid.empty:
-            cand=grid[grid['模型']!='原100分'].copy()
-            cand['三項全改善']=((cand['勝率改善ppt']>0)&(cand['平均報酬改善ppt']>0)&(cand['PF改善']>0))
-            st.markdown('### 📋 全部門檻 × 持有期')
-            showcols=['模型','門檻','持有日','樣本數','勝率%','平均報酬%','PF',
-                      '勝率改善ppt','平均報酬改善ppt','PF改善','95%CI下限%',
-                      '涵蓋年度數','年度正報酬比例%','三項全改善']
-            st.dataframe(cand.sort_values(['三項全改善','平均報酬改善ppt','PF改善'],
-                                         ascending=[False,False,False])[showcols],
-                         use_container_width=True,hide_index=True)
+            st.markdown('### 🔍 門檻 × 持有期明細')
+            show = grid[grid['Gate'] != '原技術訊號'].copy()
+            show['三項全改善'] = (
+                (show['勝率改善ppt'] > 0) &
+                (show['平均報酬改善ppt'] > 0) &
+                (show['PF改善'] > 0)
+            )
+            st.dataframe(
+                show.sort_values(
+                    ['三項全改善','平均報酬改善ppt','PF改善'],
+                    ascending=[False,False,False]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
 
-        if streak_df is not None and not streak_df.empty:
-            st.markdown('### 🔵 A模型｜外資連買天數拆解')
-            ss=(streak_df.groupby('外資連買區間',as_index=False)
-                .agg(測試組合數=('外資連買區間','size'),
-                     平均樣本數=('樣本數','mean'),
-                     平均勝率=('勝率%','mean'),
-                     平均報酬=('平均報酬%','mean'),
-                     平均PF=('PF','mean'),
-                     平均CI下限=('95%CI下限%','mean')))
-            order=['≤0天','1-2天','3-4天','5天以上','無資料']
-            ss['外資連買區間']=pd.Categorical(ss['外資連買區間'],categories=order,ordered=True)
-            st.dataframe(ss.sort_values('外資連買區間'),use_container_width=True,hide_index=True)
+            st.markdown('### ⏳ Gate × 持有期穩定度')
+            hold = (
+                show.groupby(['Gate','持有日'], as_index=False)
+                .agg(
+                    測試組合數=('Gate','size'),
+                    平均訊號保留率=('訊號保留率%','mean'),
+                    平均勝率改善ppt=('勝率改善ppt','mean'),
+                    平均報酬改善ppt=('平均報酬改善ppt','mean'),
+                    平均PF改善=('PF改善','mean'),
+                )
+            )
+            st.dataframe(
+                hold.sort_values(['Gate','平均報酬改善ppt'], ascending=[True,False]),
+                use_container_width=True,
+                hide_index=True
+            )
 
-        if intensity_df is not None and not intensity_df.empty:
-            st.markdown('### 💪 A模型｜外資5日買超強度拆解')
-            ii=(intensity_df.groupby('外資強度區間',as_index=False)
-                .agg(測試組合數=('外資強度區間','size'),
-                     平均樣本數=('樣本數','mean'),
-                     平均勝率=('勝率%','mean'),
-                     平均報酬=('平均報酬%','mean'),
-                     平均PF=('PF','mean'),
-                     平均CI下限=('95%CI下限%','mean')))
-            order2=['≤0%','0-0.5%','0.5-1%','1-2%','≥2%','無資料']
-            ii['外資強度區間']=pd.Categorical(ii['外資強度區間'],categories=order2,ordered=True)
-            st.dataframe(ii.sort_values('外資強度區間'),use_container_width=True,hide_index=True)
+        st.markdown('### ✅ Gate 正式採用標準')
+        st.write(
+            '① 三項全改善比例 ≥ 60%　'
+            '② 平均勝率/報酬/PF 都 > 0　'
+            '③ 平均訊號保留率 ≥ 20%　'
+            '④ 20/30/40日至少兩個週期為正改善。'
+        )
+        st.warning(
+            '如果 Gate 讓績效提高，但只剩不到20%的訊號，會視為過濾過度；'
+            '我們要找的是「品質提升且仍有足夠交易機會」。'
+        )
 
-        st.markdown('### ✅ V3.5.4 判定標準')
-        st.write('A 技術95＋外資5 若同時符合以下條件，下一版才正式進入主策略候選：')
-        st.write('① 三項全改善比例 ≥ 70%　② 平均報酬改善 > 0　③ 平均PF改善 > 0　④ 20/30/40日至少兩個週期為正改善　⑤ 樣本數不只集中在單一小區間。')
-        st.warning('年度正報酬比例必須搭配「涵蓋年度數」一起看。若涵蓋年度數只有1，100%不能視為跨年度證明。')
-
-        st.download_button('⬇️ 下載 V3.5.4 全部驗證結果',
-            grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.4_foreign_factor_grid.csv','text/csv',key='dl_v353_grid')
-        st.download_button('⬇️ 下載 V3.5.4 模型穩健度',
-            ms.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.4_foreign_factor_model_summary.csv','text/csv',key='dl_v353_ms')
+        st.download_button(
+            '⬇️ 下載 V3.5.5 Gate 完整結果',
+            grid.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.5.5_foreign_gate_grid.csv',
+            'text/csv',
+            key='dl_v355_grid'
+        )
+        st.download_button(
+            '⬇️ 下載 V3.5.5 Gate 證據排名',
+            summary.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.5.5_foreign_gate_summary.csv',
+            'text/csv',
+            key='dl_v355_summary'
+        )
     else:
-        st.write('設定條件後按「執行 V3.5.4 外資因子證明」。')
-
-with t14:
-    st.subheader('⚖️ V3.5.4 外資最佳權重驗證')
-    st.caption('只驗證外資：0 / 2.5 / 5 / 7.5 / 10 / 12.5 / 15%，找「穩定平台」而不是單一尖峰。')
-    c1,c2,c3=st.columns(3)
-    days=c1.slider('法人歷史交易日數',120,260,200,20,key='v354_days')
-    mins=c2.slider('最低有效樣本數',30,150,40,10,key='v354_min')
-    evs=c3.slider('每檔最多事件日',120,260,200,20,key='v354_evs')
-    ths=st.multiselect('門檻',[70,75,80,85,90,95],default=[75,80,85,90],key='v354_th')
-    hs=st.multiselect('持有日',[10,20,30,40],default=[20,30,40],key='v354_h')
-    ws=st.multiselect('外資權重%',[0,2.5,5,7.5,10,12.5,15],default=[0,2.5,5,7.5,10,12.5,15],key='v354_w')
-    if st.button('▶ 執行 V3.5.4 外資權重驗證',type='primary',key='run_v354'):
-        with st.spinner('測試外資權重曲線...'):
-            hist=load_twse_chip_history(days);base=collect_a242_event_base(result,hist,evs)
-            if base is not None and not base.empty and 40 in hs and '報酬40日%' not in base.columns:
-                pmap={}
-                for _,rr in result.iterrows():
-                    code=str(rr['股票']).zfill(4);df=rr.get('_df')
-                    if df is not None and not df.empty:
-                        x=df.copy();x.index=pd.to_datetime(x.index).tz_localize(None).normalize();pmap[code]=x
-                vals=[]
-                for _,r in base.iterrows():
-                    df=pmap.get(str(r['股票']).zfill(4));dt=pd.Timestamp(r['日期']).normalize();v=np.nan
-                    if df is not None and dt in df.index:
-                        p=df.index.get_loc(dt)
-                        if isinstance(p,(int,np.integer)) and p+40<len(df):v=(float(df['Close'].iloc[p+40])/float(df['Close'].iloc[p])-1)*100
-                    vals.append(v)
-                base['報酬40日%']=vals
-            comp,s,hold,streak,intensity=run_v354_weight_curve(base,tuple(ths),tuple(hs),mins,tuple(ws))
-            st.session_state.update(v354_comp=comp,v354_summary=s,v354_hold=hold,v354_streak=streak,v354_intensity=intensity)
-    s=st.session_state.get('v354_summary',pd.DataFrame());comp=st.session_state.get('v354_comp',pd.DataFrame())
-    hold=st.session_state.get('v354_hold',pd.DataFrame());streak=st.session_state.get('v354_streak',pd.DataFrame());intensity=st.session_state.get('v354_intensity',pd.DataFrame())
-    if s is not None and not s.empty:
-        st.markdown('### 🏆 外資權重證據排名');st.dataframe(s,use_container_width=True,hide_index=True)
-        b=s.iloc[0];st.metric('目前最佳外資權重',f"{b['外資權重%']:g}%");st.metric('三項全改善比例',f"{b['三項全改善比例']:.1f}%")
-        st.write(f"平均勝率改善 **{b['平均勝率改善ppt']:+.3f} ppt**｜平均報酬改善 **{b['平均報酬改善ppt']:+.3f} ppt**｜平均PF改善 **{b['平均PF改善']:+.3f}**")
-        st.markdown('### 📈 權重曲線');st.line_chart(s.sort_values('外資權重%').set_index('外資權重%')[['平均勝率改善ppt','平均報酬改善ppt','平均PF改善']])
-        st.markdown('### ⏳ 20 / 30 / 40日穩定度');st.dataframe(hold,use_container_width=True,hide_index=True)
-        if not streak.empty:
-            st.markdown('### 🔵 最佳權重｜外資連買區間')
-            st.dataframe(streak.groupby('外資連買區間',as_index=False).agg(測試組合數=('外資連買區間','size'),平均樣本數=('樣本數','mean'),平均勝率=('勝率%','mean'),平均報酬=('平均報酬%','mean'),平均PF=('PF','mean')),use_container_width=True,hide_index=True)
-        if not intensity.empty:
-            st.markdown('### 💪 最佳權重｜外資買超強度區間')
-            st.dataframe(intensity.groupby('外資強度區間',as_index=False).agg(測試組合數=('外資強度區間','size'),平均樣本數=('樣本數','mean'),平均勝率=('勝率%','mean'),平均報酬=('平均報酬%','mean'),平均PF=('PF','mean')),use_container_width=True,hide_index=True)
-        st.info('證明重點：7.5%～12.5%若形成連續正改善平台，比10%單點第一更可信。')
-        st.download_button('⬇️ 下載 V3.5.4 權重完整結果',comp.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.5.4_foreign_weight_grid.csv','text/csv')
-    else:st.write('按「執行 V3.5.4 外資權重驗證」開始。')
+        st.write('按「執行 V3.5.5 Gate 驗證」開始。')
