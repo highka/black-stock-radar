@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.5.3
-# V3.5.3：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.4
+# V3.5.4：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.5.3 Fugle 即時行情層
+# ⚡ V3.5.4 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2230,7 +2230,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.5.3 外資因子證明版 =====
+# ===== V3.5.4 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2419,7 +2419,52 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
 
     return grid, model_summary, streak_df, intensity_df
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.3｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.5.4 外資最佳權重驗證 =====
+def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
+                          min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
+    if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+    z=event_base.copy();rows=[]
+    for fw in weights:
+        col=f'_W{fw:g}';z[col]=z['技術分數']*((100-fw)/100)+z['外資因子分']*(fw/100)
+        for th in thresholds:
+            for h in horizons:
+                rc=f'報酬{h}日%'
+                if rc not in z.columns:continue
+                tr=_v353_nonoverlap(z,col,th,h)
+                if len(tr)<min_sample:continue
+                m=_v353_metrics(tr,rc);yrs,ypos=_v353_year_stats(tr,rc)
+                rows.append({'外資權重%':fw,'技術權重%':100-fw,'門檻':th,'持有日':h,**m,'涵蓋年度數':yrs,'年度正報酬比例%':ypos})
+    grid=pd.DataFrame(rows)
+    if grid.empty:return grid,pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+    base=grid[grid['外資權重%']==0][['門檻','持有日','勝率%','平均報酬%','PF']].rename(columns={'勝率%':'基準勝率%','平均報酬%':'基準平均報酬%','PF':'基準PF'})
+    comp=grid.merge(base,on=['門檻','持有日'],how='left')
+    comp['勝率改善ppt']=comp['勝率%']-comp['基準勝率%'];comp['平均報酬改善ppt']=comp['平均報酬%']-comp['基準平均報酬%'];comp['PF改善']=comp['PF']-comp['基準PF']
+    comp['三項全改善']=(comp['勝率改善ppt']>0)&(comp['平均報酬改善ppt']>0)&(comp['PF改善']>0)
+    s=(comp[comp['外資權重%']>0].groupby('外資權重%',as_index=False)
+       .agg(測試組合數=('外資權重%','size'),三項全改善比例=('三項全改善',lambda x:x.mean()*100),
+            平均勝率改善ppt=('勝率改善ppt','mean'),平均報酬改善ppt=('平均報酬改善ppt','mean'),
+            平均PF改善=('PF改善','mean'),平均樣本數=('樣本數','mean'),平均CI下限=('95%CI下限%','mean')))
+    s['通過基本證據']=(s['平均勝率改善ppt']>0)&(s['平均報酬改善ppt']>0)&(s['平均PF改善']>0)
+    s['證據分']=s['三項全改善比例']*.08+s['平均勝率改善ppt']+s['平均報酬改善ppt']*2+s['平均PF改善']*5+np.clip(s['平均CI下限'],-10,10)*.25
+    s=s.sort_values(['通過基本證據','證據分'],ascending=[False,False])
+    hold=(comp[comp['外資權重%']>0].groupby(['外資權重%','持有日'],as_index=False)
+          .agg(平均勝率改善ppt=('勝率改善ppt','mean'),平均報酬改善ppt=('平均報酬改善ppt','mean'),
+               平均PF改善=('PF改善','mean'),三項全改善比例=('三項全改善',lambda x:x.mean()*100),平均樣本數=('樣本數','mean')))
+    valid=s[s['通過基本證據']];bestw=float(valid.iloc[0]['外資權重%']) if not valid.empty else float(s.iloc[0]['外資權重%'])
+    z['_BEST']=z['技術分數']*((100-bestw)/100)+z['外資因子分']*(bestw/100)
+    z['外資連買區間']=z['外資連買賣天數'].apply(_v353_streak_band);z['外資強度區間']=z['外資5日強度%'].apply(_v353_intensity_band)
+    def bands(col):
+        rr=[]
+        for th in thresholds:
+            for h in horizons:
+                rc=f'報酬{h}日%'
+                for band,g in z.groupby(col):
+                    tr=_v353_nonoverlap(g,'_BEST',th,h)
+                    if len(tr)>=min_sample:rr.append({'最佳外資權重%':bestw,'門檻':th,'持有日':h,col:band,**_v353_metrics(tr,rc)})
+        return pd.DataFrame(rr)
+    return comp,s,hold,bands('外資連買區間'),bands('外資強度區間')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.4｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -2485,7 +2530,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.3｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.4｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2596,7 +2641,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　KD K {r['K']:.1f} / D {r['D']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室','🧪 A2.4 籌碼回測','🩺 A2.4 籌碼策略健診','🧾 V3.5.3 外資因子證明'])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室','🧪 A2.4 籌碼回測','🩺 A2.4 籌碼策略健診','🧾 V3.5.4 外資因子證明','⚖️ V3.5.4 外資權重驗證'])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','日期檢查','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -3107,7 +3152,7 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.5.3｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.5.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
 
 with t10:
     st.subheader('🏦 A2.4 籌碼實驗室｜C版')
@@ -3161,7 +3206,7 @@ with t11:
         st.write('按「執行 A2.4 四模型回測」開始比較。')
 
 with t12:
-    st.subheader('🩺 A2.4 籌碼策略健診｜V3.5.3')
+    st.subheader('🩺 A2.4 籌碼策略健診｜V3.5.4')
     st.caption('一次交叉測試：門檻 × 持有期 × 外資/投信權重 × 連買天數，並設定最低樣本數，避免小樣本假冠軍。')
 
     c1,c2,c3=st.columns(3)
@@ -3172,7 +3217,7 @@ with t12:
     thresholds=st.multiselect('分數門檻',[70,75,80,85,90,95],default=[75,80,85,90],key='a242_thresholds')
     horizons=st.multiselect('持有交易日',[5,10,20,30],default=[5,10,20,30],key='a242_horizons')
 
-    if st.button('▶ 執行 V3.5.3 籌碼策略健診',type='primary',key='run_a242'):
+    if st.button('▶ 執行 V3.5.4 籌碼策略健診',type='primary',key='run_a242'):
         with st.spinner('建立法人×技術歷史事件底表，執行多參數敏感度測試...'):
             hist=load_twse_chip_history(hist_days)
             base=collect_a242_event_base(result,hist,max_events)
@@ -3223,19 +3268,19 @@ with t12:
         st.dataframe(streak.sort_values('平均報酬改善ppt',ascending=False),
                      use_container_width=True,hide_index=True)
 
-        st.download_button('⬇️ 下載 V3.5.3 全部敏感度結果',
+        st.download_button('⬇️ 下載 V3.5.4 全部敏感度結果',
             comp.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.3_chip_diagnostic_all.csv','text/csv',key='dl_a242_all')
-        st.download_button('⬇️ 下載 V3.5.3 穩健度排名',
+            'V3.5.4_chip_diagnostic_all.csv','text/csv',key='dl_a242_all')
+        st.download_button('⬇️ 下載 V3.5.4 穩健度排名',
             rank.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.3_chip_diagnostic_rank.csv','text/csv',key='dl_a242_rank')
+            'V3.5.4_chip_diagnostic_rank.csv','text/csv',key='dl_a242_rank')
 
         st.info('判讀建議：不要只看第1名。優先選擇「多個門檻、多個持有期都保持正改善」的模型；若只有單一條件特別強，先視為過度擬合候選。')
     else:
-        st.write('設定條件後按「執行 V3.5.3 籌碼策略健診」。')
+        st.write('設定條件後按「執行 V3.5.4 籌碼策略健診」。')
 
 with t13:
-    st.subheader('🧾 V3.5.3 外資因子證明')
+    st.subheader('🧾 V3.5.4 外資因子證明')
     st.caption('目標不是找單一冠軍，而是證明「外資5%」是否跨門檻、跨持有期、跨連買/強度區間仍穩定優於原100分。')
 
     c1,c2,c3=st.columns(3)
@@ -3248,7 +3293,7 @@ with t13:
     horizons=st.multiselect('持有交易日',[10,20,30,40],
                             default=[20,30,40],key='v353_horizons')
 
-    if st.button('▶ 執行 V3.5.3 外資因子證明',type='primary',key='run_v353'):
+    if st.button('▶ 執行 V3.5.4 外資因子證明',type='primary',key='run_v353'):
         with st.spinner('建立較長法人事件底表並驗證外資因子...'):
             hist=load_twse_chip_history(hist_days)
             base=collect_a242_event_base(result,hist,max_events)
@@ -3337,16 +3382,63 @@ with t13:
             ii['外資強度區間']=pd.Categorical(ii['外資強度區間'],categories=order2,ordered=True)
             st.dataframe(ii.sort_values('外資強度區間'),use_container_width=True,hide_index=True)
 
-        st.markdown('### ✅ V3.5.3 判定標準')
+        st.markdown('### ✅ V3.5.4 判定標準')
         st.write('A 技術95＋外資5 若同時符合以下條件，下一版才正式進入主策略候選：')
         st.write('① 三項全改善比例 ≥ 70%　② 平均報酬改善 > 0　③ 平均PF改善 > 0　④ 20/30/40日至少兩個週期為正改善　⑤ 樣本數不只集中在單一小區間。')
         st.warning('年度正報酬比例必須搭配「涵蓋年度數」一起看。若涵蓋年度數只有1，100%不能視為跨年度證明。')
 
-        st.download_button('⬇️ 下載 V3.5.3 全部驗證結果',
+        st.download_button('⬇️ 下載 V3.5.4 全部驗證結果',
             grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.3_foreign_factor_grid.csv','text/csv',key='dl_v353_grid')
-        st.download_button('⬇️ 下載 V3.5.3 模型穩健度',
+            'V3.5.4_foreign_factor_grid.csv','text/csv',key='dl_v353_grid')
+        st.download_button('⬇️ 下載 V3.5.4 模型穩健度',
             ms.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.3_foreign_factor_model_summary.csv','text/csv',key='dl_v353_ms')
+            'V3.5.4_foreign_factor_model_summary.csv','text/csv',key='dl_v353_ms')
     else:
-        st.write('設定條件後按「執行 V3.5.3 外資因子證明」。')
+        st.write('設定條件後按「執行 V3.5.4 外資因子證明」。')
+
+with t14:
+    st.subheader('⚖️ V3.5.4 外資最佳權重驗證')
+    st.caption('只驗證外資：0 / 2.5 / 5 / 7.5 / 10 / 12.5 / 15%，找「穩定平台」而不是單一尖峰。')
+    c1,c2,c3=st.columns(3)
+    days=c1.slider('法人歷史交易日數',120,260,200,20,key='v354_days')
+    mins=c2.slider('最低有效樣本數',30,150,40,10,key='v354_min')
+    evs=c3.slider('每檔最多事件日',120,260,200,20,key='v354_evs')
+    ths=st.multiselect('門檻',[70,75,80,85,90,95],default=[75,80,85,90],key='v354_th')
+    hs=st.multiselect('持有日',[10,20,30,40],default=[20,30,40],key='v354_h')
+    ws=st.multiselect('外資權重%',[0,2.5,5,7.5,10,12.5,15],default=[0,2.5,5,7.5,10,12.5,15],key='v354_w')
+    if st.button('▶ 執行 V3.5.4 外資權重驗證',type='primary',key='run_v354'):
+        with st.spinner('測試外資權重曲線...'):
+            hist=load_twse_chip_history(days);base=collect_a242_event_base(result,hist,evs)
+            if base is not None and not base.empty and 40 in hs and '報酬40日%' not in base.columns:
+                pmap={}
+                for _,rr in result.iterrows():
+                    code=str(rr['股票']).zfill(4);df=rr.get('_df')
+                    if df is not None and not df.empty:
+                        x=df.copy();x.index=pd.to_datetime(x.index).tz_localize(None).normalize();pmap[code]=x
+                vals=[]
+                for _,r in base.iterrows():
+                    df=pmap.get(str(r['股票']).zfill(4));dt=pd.Timestamp(r['日期']).normalize();v=np.nan
+                    if df is not None and dt in df.index:
+                        p=df.index.get_loc(dt)
+                        if isinstance(p,(int,np.integer)) and p+40<len(df):v=(float(df['Close'].iloc[p+40])/float(df['Close'].iloc[p])-1)*100
+                    vals.append(v)
+                base['報酬40日%']=vals
+            comp,s,hold,streak,intensity=run_v354_weight_curve(base,tuple(ths),tuple(hs),mins,tuple(ws))
+            st.session_state.update(v354_comp=comp,v354_summary=s,v354_hold=hold,v354_streak=streak,v354_intensity=intensity)
+    s=st.session_state.get('v354_summary',pd.DataFrame());comp=st.session_state.get('v354_comp',pd.DataFrame())
+    hold=st.session_state.get('v354_hold',pd.DataFrame());streak=st.session_state.get('v354_streak',pd.DataFrame());intensity=st.session_state.get('v354_intensity',pd.DataFrame())
+    if s is not None and not s.empty:
+        st.markdown('### 🏆 外資權重證據排名');st.dataframe(s,use_container_width=True,hide_index=True)
+        b=s.iloc[0];st.metric('目前最佳外資權重',f"{b['外資權重%']:g}%");st.metric('三項全改善比例',f"{b['三項全改善比例']:.1f}%")
+        st.write(f"平均勝率改善 **{b['平均勝率改善ppt']:+.3f} ppt**｜平均報酬改善 **{b['平均報酬改善ppt']:+.3f} ppt**｜平均PF改善 **{b['平均PF改善']:+.3f}**")
+        st.markdown('### 📈 權重曲線');st.line_chart(s.sort_values('外資權重%').set_index('外資權重%')[['平均勝率改善ppt','平均報酬改善ppt','平均PF改善']])
+        st.markdown('### ⏳ 20 / 30 / 40日穩定度');st.dataframe(hold,use_container_width=True,hide_index=True)
+        if not streak.empty:
+            st.markdown('### 🔵 最佳權重｜外資連買區間')
+            st.dataframe(streak.groupby('外資連買區間',as_index=False).agg(測試組合數=('外資連買區間','size'),平均樣本數=('樣本數','mean'),平均勝率=('勝率%','mean'),平均報酬=('平均報酬%','mean'),平均PF=('PF','mean')),use_container_width=True,hide_index=True)
+        if not intensity.empty:
+            st.markdown('### 💪 最佳權重｜外資買超強度區間')
+            st.dataframe(intensity.groupby('外資強度區間',as_index=False).agg(測試組合數=('外資強度區間','size'),平均樣本數=('樣本數','mean'),平均勝率=('勝率%','mean'),平均報酬=('平均報酬%','mean'),平均PF=('PF','mean')),use_container_width=True,hide_index=True)
+        st.info('證明重點：7.5%～12.5%若形成連續正改善平台，比10%單點第一更可信。')
+        st.download_button('⬇️ 下載 V3.5.4 權重完整結果',comp.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.5.4_foreign_weight_grid.csv','text/csv')
+    else:st.write('按「執行 V3.5.4 外資權重驗證」開始。')
