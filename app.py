@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.4.4
-# V3.4.4：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.0
+# V3.5.0：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.4.4 Fugle 即時行情層
+# ⚡ V3.5.0 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -1903,7 +1903,72 @@ def run_a235_portfolio(history, strategy_name, min_score, horizon,
 
 
 # Sidebar
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.4.4｜B模式：即時優先＋最新盤後價備援')
+
+# ===== A2.4 籌碼實驗室 C版：先研究，不改原100分 =====
+def _chip_num(v): return pd.to_numeric(str(v).replace(',','').strip(),errors='coerce')
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_twse_t86_day(date_yyyymmdd):
+    cols=['日期','股票','名稱','外資買賣超股數','投信買賣超股數']
+    try:
+        r=requests.get('https://www.twse.com.tw/rwd/zh/fund/T86',params={'date':date_yyyymmdd,'response':'json','selectType':'ALLBUT0999'},headers={'User-Agent':'Mozilla/5.0'},timeout=20)
+        r.raise_for_status();x=r.json();fields=x.get('fields',[]);data=x.get('data',[])
+        def ix(*ks):
+            for i,f in enumerate(fields):
+                if all(k in f for k in ks):return i
+            return None
+        ic,inn,iff,itt=ix('證券代號'),ix('證券名稱'),ix('外陸資買賣超股數','不含外資自營商'),ix('投信買賣超股數')
+        if None in (ic,inn,iff,itt):return pd.DataFrame(columns=cols)
+        rows=[]
+        for a in data:
+            code=str(a[ic]).strip()
+            if re.fullmatch(r'\d{4,6}',code):
+                rows.append({'日期':pd.to_datetime(date_yyyymmdd),'股票':code.zfill(4),'名稱':str(a[inn]).strip(),'外資買賣超股數':_chip_num(a[iff]),'投信買賣超股數':_chip_num(a[itt])})
+        return pd.DataFrame(rows,columns=cols)
+    except Exception:return pd.DataFrame(columns=cols)
+def recent_weekdays(n):
+    d=taiwan_now().date();out=[]
+    while len(out)<n:
+        if d.weekday()<5:out.append(pd.Timestamp(d))
+        d-=timedelta(days=1)
+    return list(reversed(out))
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_twse_chip_history(days=15):
+    parts=[]
+    for d in recent_weekdays(days+8):
+        x=load_twse_t86_day(d.strftime('%Y%m%d'))
+        if not x.empty:parts.append(x)
+    if not parts:return pd.DataFrame()
+    z=pd.concat(parts,ignore_index=True).sort_values(['股票','日期']);valid=sorted(z['日期'].unique())[-days:]
+    return z[z['日期'].isin(valid)].copy()
+def signed_streak(vals):
+    s=pd.Series(vals).dropna().astype(float)
+    if s.empty or s.iloc[-1]==0:return 0
+    sign=1 if s.iloc[-1]>0 else -1;n=0
+    for v in s.iloc[::-1]:
+        if (v>0)==(sign>0):n+=1
+        else:break
+    return sign*n
+def chip_features(hist,price_frames):
+    if hist is None or hist.empty:return pd.DataFrame()
+    rows=[]
+    for code,g in hist.groupby('股票'):
+        g=g.sort_values('日期');fs=signed_streak(g['外資買賣超股數']);ts=signed_streak(g['投信買賣超股數'])
+        f5=float(g['外資買賣超股數'].tail(5).sum());t5=float(g['投信買賣超股數'].tail(5).sum())
+        pdf=price_frames.get(code);v5=float(pd.to_numeric(pdf['Volume'],errors='coerce').tail(5).sum()) if pdf is not None and not pdf.empty else np.nan
+        fi=f5/v5*100 if pd.notna(v5) and v5>0 else np.nan;ti=t5/v5*100 if pd.notna(v5) and v5>0 else np.nan
+        score=lambda s,i:float(np.clip(s,-5,5))+(0 if pd.isna(i) else float(np.clip(i,-5,5)))
+        rows.append({'股票':code,'外資連買賣天數':fs,'投信連買賣天數':ts,'外資5日買賣超股數':f5,'投信5日買賣超股數':t5,'外資5日強度%':fi,'投信5日強度%':ti,'外資研究分':round(score(fs,fi),2),'投信研究分':round(score(ts,ti),2),'籌碼研究分':round(score(fs,fi)+score(ts,ti),2),'籌碼資料日':g['日期'].max().strftime('%Y-%m-%d')})
+    return pd.DataFrame(rows)
+def chip_signal_label(r):
+    f=int(r.get('外資連買賣天數',0) or 0);q=int(r.get('投信連買賣天數',0) or 0)
+    if f>=3 and q>=3:return '🔥 外資＋投信同步連買'
+    if q>=3:return '🟣 投信連買'
+    if f>=3:return '🔵 外資連買'
+    if f<=-3 and q<=-3:return '⚠️ 法人同步連賣'
+    if q<=-3:return '🟠 投信連賣'
+    if f<=-3:return '🟡 外資連賣'
+    return '—'
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.0｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -1969,7 +2034,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.4.4｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.0｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2080,7 +2145,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　KD K {r['K']:.1f} / D {r['D']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab'])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室'])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','日期檢查','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -2591,4 +2656,22 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.4.4｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.5.0｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+
+with t10:
+    st.subheader('🏦 A2.4 籌碼實驗室｜C版')
+    st.caption('同時測：外資/投信連續買賣天數＋近5日淨買賣超＋近5日買超強度。先研究，不直接改原100分。')
+    st.info('第一階段先接 TWSE 官方 T86 上市股票。上櫃/興櫃下一階段再接 TPEx，避免不同市場資料格式混算。')
+    c1,c2,c3=st.columns(3);days=c1.slider('法人歷史交易日',10,30,15,key='chip_days');min_streak=c2.slider('連買門檻',1,10,3,key='chip_streak');min_int=c3.number_input('5日買超強度門檻 %',value=0.5,step=0.1,key='chip_int')
+    if st.button('▶ 載入 A2.4 籌碼資料',type='primary',key='run_chip'):
+        with st.spinner('讀取 TWSE T86 並計算籌碼因子...'):
+            hist=load_twse_chip_history(days);pmap={str(r['股票']).zfill(4):r['_df'] for _,r in result.iterrows()};st.session_state['chip_features']=chip_features(hist,pmap)
+    cf=st.session_state.get('chip_features',pd.DataFrame())
+    if cf is not None and not cf.empty:
+        v=result[['股票','名稱','市場','價格','綜合分數']].copy();v['股票']=v['股票'].astype(str).str.zfill(4);v=v.merge(cf,on='股票',how='left');v['籌碼訊號']=v.apply(chip_signal_label,axis=1)
+        v['C版候選']=(((v['外資連買賣天數'].fillna(0)>=min_streak)|(v['投信連買賣天數'].fillna(0)>=min_streak))&((v['外資5日強度%'].fillna(0)>=min_int)|(v['投信5日強度%'].fillna(0)>=min_int)))
+        st.dataframe(v.sort_values(['C版候選','籌碼研究分','綜合分數'],ascending=[False,False,False]),use_container_width=True,hide_index=True)
+        st.download_button('⬇️ 下載 A2.4 C版結果',v.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_lab_C.csv','text/csv')
+        st.markdown('#### 下一階段正式PK');st.write('① 原100分　② 技術90%＋外資5%＋投信5%　③ 技術85%＋外資5%＋投信10%　④ 技術80%＋外資10%＋投信10%。')
+        st.warning('目前籌碼研究分只用於排序。下一版把法人歷史資料對齊每個訊號日，再跑非重疊交易、年度拆解、PF、Portfolio MDD，才決定正式權重。')
+    else:st.write('按「載入 A2.4 籌碼資料」開始。')
