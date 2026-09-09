@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.5.5
-# V3.5.5：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.6
+# V3.5.6：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.5.5 Fugle 即時行情層
+# ⚡ V3.5.6 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2230,7 +2230,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.5.5 外資因子證明版 =====
+# ===== V3.5.6 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2420,7 +2420,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.5.5 外資最佳權重驗證 =====
+# ===== V3.5.6 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2465,29 +2465,74 @@ def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,
         return pd.DataFrame(rr)
     return comp,s,hold,bands('外資連買區間'),bands('外資強度區間')
 
-# ===== V3.5.5 外資 Gate 驗證 =====
+
+def add_v356_flip_features(event_base, chip_hist):
+    """
+    將外資買賣超的前一日/前兩日/前三日狀態對齊到事件底表，
+    產生「賣→買第1天」「連賣後轉買」等翻多條件。
+    """
+    if event_base is None or event_base.empty or chip_hist is None or chip_hist.empty:
+        return event_base
+
+    ch = chip_hist.copy()
+    ch['日期'] = pd.to_datetime(ch['日期']).dt.tz_localize(None).dt.normalize()
+    ch = ch.sort_values(['股票','日期'])
+    ch['外資_今日'] = pd.to_numeric(ch['外資買賣超股數'], errors='coerce')
+    ch['外資_前1日'] = ch.groupby('股票')['外資_今日'].shift(1)
+    ch['外資_前2日'] = ch.groupby('股票')['外資_今日'].shift(2)
+    ch['外資_前3日'] = ch.groupby('股票')['外資_今日'].shift(3)
+
+    ch['外資賣轉買第1天'] = (
+        (ch['外資_前1日'] < 0) &
+        (ch['外資_今日'] > 0)
+    )
+
+    ch['外資連賣2日後轉買'] = (
+        (ch['外資_前1日'] < 0) &
+        (ch['外資_前2日'] < 0) &
+        (ch['外資_今日'] > 0)
+    )
+
+    ch['外資連賣3日後轉買'] = (
+        (ch['外資_前1日'] < 0) &
+        (ch['外資_前2日'] < 0) &
+        (ch['外資_前3日'] < 0) &
+        (ch['外資_今日'] > 0)
+    )
+
+    keep = ch[['股票','日期','外資賣轉買第1天','外資連賣2日後轉買','外資連賣3日後轉買']].copy()
+    base = event_base.copy()
+    base['日期'] = pd.to_datetime(base['日期']).dt.tz_localize(None).dt.normalize()
+    return base.merge(keep, on=['股票','日期'], how='left')
+
+
+# ===== V3.5.6 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
     fi = pd.to_numeric(z['外資5日強度%'], errors='coerce')
+    flip1 = z.get('外資賣轉買第1天', pd.Series(False,index=z.index)).fillna(False).astype(bool)
+    flip2 = z.get('外資連賣2日後轉買', pd.Series(False,index=z.index)).fillna(False).astype(bool)
+    flip3 = z.get('外資連賣3日後轉買', pd.Series(False,index=z.index)).fillna(False).astype(bool)
+
     if gate_name == '原技術訊號':
         return pd.Series(True, index=z.index)
-    if gate_name == '外資買超第1天':
-        return fs == 1
-    if gate_name == '外資連買1-2天':
-        return (fs >= 1) & (fs <= 2)
-    if gate_name == '外資連買3-4天':
-        return (fs >= 3) & (fs <= 4)
-    if gate_name == '外資強度≥0.5%':
-        return fi >= 0.5
-    if gate_name == '外資強度≥1%':
-        return fi >= 1.0
-    if gate_name == '外資強度≥2%':
-        return fi >= 2.0
-    if gate_name == '連買1-2天＋強度≥1%':
-        return (fs >= 1) & (fs <= 2) & (fi >= 1.0)
     if gate_name == '連買1-2天＋強度≥2%':
         return (fs >= 1) & (fs <= 2) & (fi >= 2.0)
+    if gate_name == '賣→買第1天':
+        return flip1
+    if gate_name == '連賣2日→轉買':
+        return flip2
+    if gate_name == '連賣3日→轉買':
+        return flip3
+    if gate_name == '賣→買＋強度≥1%':
+        return flip1 & (fi >= 1.0)
+    if gate_name == '賣→買＋強度≥2%':
+        return flip1 & (fi >= 2.0)
+    if gate_name == '連賣2日→轉買＋強度≥1%':
+        return flip2 & (fi >= 1.0)
+    if gate_name == '連賣2日→轉買＋強度≥2%':
+        return flip2 & (fi >= 2.0)
     return pd.Series(False, index=z.index)
 
 def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
@@ -2497,14 +2542,14 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
     gates = [
         '原技術訊號',
-        '外資買超第1天',
-        '外資連買1-2天',
-        '外資連買3-4天',
-        '外資強度≥0.5%',
-        '外資強度≥1%',
-        '外資強度≥2%',
-        '連買1-2天＋強度≥1%',
         '連買1-2天＋強度≥2%',
+        '賣→買第1天',
+        '連賣2日→轉買',
+        '連賣3日→轉買',
+        '賣→買＋強度≥1%',
+        '賣→買＋強度≥2%',
+        '連賣2日→轉買＋強度≥1%',
+        '連賣2日→轉買＋強度≥2%',
     ]
 
     rows = []
@@ -2603,7 +2648,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
     )
     return grid, summary
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.5｜B模式：即時優先＋最新盤後價備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.6｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -2669,7 +2714,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.5｜精簡版：保留日常雷達功能＋外資 Gate 驗證；舊回測頁已清除，行情核心沿用 TWSE MI_INDEX＋Fugle/Yahoo 架構。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.6｜精簡版：保留日常雷達功能＋外資 Gate 驗證；舊回測頁已清除，行情核心沿用 TWSE MI_INDEX＋Fugle/Yahoo 架構。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2818,8 +2863,8 @@ with t5:
 
 
 with t6:
-    st.subheader('🚪 V3.5.5 外資 Gate 驗證')
-    st.caption('已完成的舊回測頁已從主介面移除。現在只保留尚未定案的核心問題：外資是否適合當進場確認條件，而不是直接加權。')
+    st.subheader('🔄 V3.5.6 外資翻多 Gate 驗證')
+    st.caption('已完成的舊回測頁已從主介面移除。現在只保留尚未定案的核心問題：外資是否在「由賣轉買」的翻多初期，能成為比單純連買更有效的進場確認條件。')
 
     st.info(
         '目前驗證方向：原技術100分不改，法人只當 Gate。'
@@ -2844,10 +2889,11 @@ with t6:
         key='v355_horizons'
     )
 
-    if st.button('▶ 執行 V3.5.5 Gate 驗證', type='primary', key='run_v355'):
+    if st.button('▶ 執行 V3.5.6 Gate 驗證', type='primary', key='run_v355'):
         with st.spinner('建立法人歷史事件並比較各 Gate...'):
             hist = load_twse_chip_history(hist_days)
             base = collect_a242_event_base(result, hist, max_events)
+            base = add_v356_flip_features(base, hist)
 
             # 補40日報酬
             if base is not None and not base.empty and 40 in horizons and '報酬40日%' not in base.columns:
@@ -2936,6 +2982,40 @@ with t6:
                 hide_index=True
             )
 
+            st.markdown('### 🔄 翻多 Gate 專屬比較')
+            flip_only = show[
+                show['Gate'].isin([
+                    '賣→買第1天',
+                    '連賣2日→轉買',
+                    '連賣3日→轉買',
+                    '賣→買＋強度≥1%',
+                    '賣→買＋強度≥2%',
+                    '連賣2日→轉買＋強度≥1%',
+                    '連賣2日→轉買＋強度≥2%',
+                    '連買1-2天＋強度≥2%',
+                ])
+            ].copy()
+
+            if not flip_only.empty:
+                flip_summary = (
+                    flip_only.groupby('Gate', as_index=False)
+                    .agg(
+                        測試組合數=('Gate','size'),
+                        三項全改善比例=('三項全改善', lambda s:s.mean()*100),
+                        平均訊號保留率=('訊號保留率%','mean'),
+                        平均勝率改善ppt=('勝率改善ppt','mean'),
+                        平均報酬改善ppt=('平均報酬改善ppt','mean'),
+                        平均PF改善=('PF改善','mean'),
+                        平均樣本數=('樣本數','mean')
+                    )
+                    .sort_values(
+                        ['三項全改善比例','平均報酬改善ppt','平均PF改善'],
+                        ascending=[False,False,False]
+                    )
+                )
+                st.dataframe(flip_summary, use_container_width=True, hide_index=True)
+                st.caption('這張表的基準仍是同門檻、同持有期的原技術訊號，因此可以直接比較「翻多」到底有沒有額外價值。')
+
         st.markdown('### ✅ Gate 正式採用標準')
         st.write(
             '① 三項全改善比例 ≥ 60%　'
@@ -2949,18 +3029,18 @@ with t6:
         )
 
         st.download_button(
-            '⬇️ 下載 V3.5.5 Gate 完整結果',
+            '⬇️ 下載 V3.5.6 Gate 完整結果',
             grid.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.5_foreign_gate_grid.csv',
+            'V3.5.6_foreign_flip_gate_grid.csv',
             'text/csv',
             key='dl_v355_grid'
         )
         st.download_button(
-            '⬇️ 下載 V3.5.5 Gate 證據排名',
+            '⬇️ 下載 V3.5.6 Gate 證據排名',
             summary.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.5_foreign_gate_summary.csv',
+            'V3.5.6_foreign_flip_gate_summary.csv',
             'text/csv',
             key='dl_v355_summary'
         )
     else:
-        st.write('按「執行 V3.5.5 Gate 驗證」開始。')
+        st.write('按「執行 V3.5.6 Gate 驗證」開始。')
