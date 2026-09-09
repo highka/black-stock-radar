@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.5.0
-# V3.5.0：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.1
+# V3.5.1：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.5.0 Fugle 即時行情層
+# ⚡ V3.5.1 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -1968,7 +1968,104 @@ def chip_signal_label(r):
     if q<=-3:return '🟠 投信連賣'
     if f<=-3:return '🟡 外資連賣'
     return '—'
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.0｜B模式：即時優先＋最新盤後價備援')
+
+# ===== A2.4.1 籌碼歷史回測 =====
+def build_chip_daily_features(hist):
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    parts=[]
+    for code,g in hist.groupby('股票'):
+        g=g.sort_values('日期').copy()
+        g['外資連買賣天數_hist']=0
+        g['投信連買賣天數_hist']=0
+        fs=[];ts=[]
+        for i in range(len(g)):
+            fs.append(signed_streak(g['外資買賣超股數'].iloc[:i+1]))
+            ts.append(signed_streak(g['投信買賣超股數'].iloc[:i+1]))
+        g['外資連買賣天數_hist']=fs;g['投信連買賣天數_hist']=ts
+        g['外資5日買賣超股數_hist']=g['外資買賣超股數'].rolling(5,min_periods=1).sum()
+        g['投信5日買賣超股數_hist']=g['投信買賣超股數'].rolling(5,min_periods=1).sum()
+        parts.append(g)
+    return pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+
+def _a24_metrics(trades):
+    if trades is None or trades.empty:
+        return {'樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數%':np.nan,'PF':np.nan}
+    r=pd.to_numeric(trades['報酬%'],errors='coerce').dropna()
+    if r.empty:return {'樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數%':np.nan,'PF':np.nan}
+    wins=r[r>0].sum();loss=-r[r<0].sum()
+    return {'樣本數':len(r),'勝率%':(r>0).mean()*100,'平均報酬%':r.mean(),'中位數%':r.median(),'PF':wins/loss if loss>0 else np.nan}
+
+def run_a24_chip_backtest(result_df, chip_hist, score_threshold=85, horizon=20, cooldown=20):
+    """
+    用目前 result 中每檔股票的歷史 _df 做技術分數近似回測，
+    再把 T86 法人資料按日期對齊，測四組權重。
+    注意：此版先做「研究級」驗證；技術歷史分數使用現有 indicators/black_score 邏輯逐日計算。
+    """
+    if chip_hist is None or chip_hist.empty:return pd.DataFrame(),pd.DataFrame()
+    chip=build_chip_daily_features(chip_hist)
+    all_trades=[]
+    models=[
+        ('原100分',1.00,0.00,0.00),
+        ('技術90＋外資5＋投信5',0.90,0.05,0.05),
+        ('技術85＋外資5＋投信10',0.85,0.05,0.10),
+        ('技術80＋外資10＋投信10',0.80,0.10,0.10),
+    ]
+    for _,rr in result_df.iterrows():
+        code=str(rr['股票']).zfill(4);df=rr.get('_df')
+        if df is None or len(df)<220:continue
+        d=indicators(df.copy())
+        cg=chip[chip['股票']==code].copy()
+        if cg.empty:continue
+        cg['日期']=pd.to_datetime(cg['日期']).dt.normalize()
+        cmap=cg.set_index('日期')
+        last_entry=-999999
+        for i in range(220,len(d)-horizon):
+            if i-last_entry<cooldown:continue
+            dt=pd.Timestamp(d.index[i]).normalize()
+            if dt not in cmap.index:continue
+            sub=d.iloc[:i+1]
+            try:
+                tech_score=float(black_score(sub)[0])
+            except Exception:
+                continue
+            if tech_score<score_threshold:continue
+            cr=cmap.loc[dt]
+            # 若同日有重複，取最後一筆
+            if isinstance(cr,pd.DataFrame):cr=cr.iloc[-1]
+            fs=float(cr.get('外資連買賣天數_hist',0));ts=float(cr.get('投信連買賣天數_hist',0))
+            # 連買賣天數映射 0~100：-5天=0, 0天=50, +5天=100
+            fscore=float(np.clip((fs+5)/10*100,0,100))
+            tscore=float(np.clip((ts+5)/10*100,0,100))
+            entry=float(d['Close'].iloc[i]);exitp=float(d['Close'].iloc[i+horizon])
+            ret=(exitp/entry-1)*100
+            for name,wt,wf,wi in models:
+                final=tech_score*wt+fscore*wf+tscore*wi
+                # 各模型採相同 85 分門檻，直接看納入籌碼後是否改善
+                if final>=score_threshold:
+                    all_trades.append({'模型':name,'股票':code,'進場日':dt,'技術分數':tech_score,
+                                       '外資連買賣天數':fs,'投信連買賣天數':ts,'綜合模型分':final,
+                                       '持有日':horizon,'報酬%':ret})
+            last_entry=i
+    trades=pd.DataFrame(all_trades)
+    if trades.empty:return trades,pd.DataFrame()
+    rows=[]
+    for name,g in trades.groupby('模型'):
+        m=_a24_metrics(g);m['模型']=name
+        # 年度穩定度
+        yrs=[]
+        gg=g.copy();gg['年']=pd.to_datetime(gg['進場日']).dt.year
+        for y,yg in gg.groupby('年'):
+            ym=_a24_metrics(yg);yrs.append(ym['平均報酬%'])
+        m['年度正報酬比例%']=np.mean([x>0 for x in yrs])*100 if yrs else np.nan
+        rows.append(m)
+    summary=pd.DataFrame(rows)
+    order=['原100分','技術90＋外資5＋投信5','技術85＋外資5＋投信10','技術80＋外資10＋投信10']
+    summary['模型']=pd.Categorical(summary['模型'],categories=order,ordered=True)
+    summary=summary.sort_values('模型')
+    return trades,summary
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.1｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -2034,7 +2131,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.0｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.1｜上市盤後改用 TWSE MI_INDEX 完整 OHLCV 直接補K；解決 Yahoo/yfinance 與 STOCK_DAY_ALL 最後K棒落後問題。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2145,7 +2242,7 @@ for col,(_,r) in zip(cols,top.iterrows()):
     icon='🟢' if r['漲跌%']>0 else '🔴' if r['漲跌%']<0 else '⚪'
     with col:st.markdown(f'''<div class="radar-card"><div class="radar-title">{icon} {r['股票']} {r['名稱']}</div><div class="small">{r['市場']}</div><div class="radar-price">{r['價格']:.2f}</div><div>{r['漲跌%']:+.2f}%　量比 {r['量比']:.2f}x　KD K {r['K']:.1f} / D {r['D']:.1f}</div><div class="radar-score">🖤 {r['黑嚕嚕分數']} / 100</div><div>{r['等級']}</div><div class="signal">{r['訊號']}</div></div>''',unsafe_allow_html=True)
 
-t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室'])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11=st.tabs(['📋 黑嚕嚕排行榜','🚨 訊號中心','📊 分數拆解','📈 個股分析','⭐ 自選股','🧪 V3.2 訊號回測','🖤 A2 綜合分數回測','🩺 A2.2 策略健診','🧪 A2.3 Strategy Lab','🏦 A2.4 籌碼實驗室','🧪 A2.4 籌碼回測'])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','日期檢查','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
     st.dataframe(show,use_container_width=True,hide_index=True,column_config={'黑嚕嚕分數':st.column_config.ProgressColumn('🖤 黑嚕嚕分數',min_value=0,max_value=100,format='%d')})
@@ -2656,7 +2753,7 @@ with t9:
         st.info('尚未完成 A2.3。按「▶ 執行 A2.3 八策略 PK」開始比較。')
 
 
-st.divider();st.caption('🖤 黑嚕嚕 V3.5.0｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
+st.divider();st.caption('🖤 黑嚕嚕 V3.5.1｜Strategy Lab Pro 八策略PK＋A2.2策略健診＋MA15/KD 基準＋智能掃描2.0；V4 再接 Fugle 即時行情。');st.caption('⚠️ 本工具僅供研究與技術分析，不構成投資建議。')
 
 with t10:
     st.subheader('🏦 A2.4 籌碼實驗室｜C版')
@@ -2675,3 +2772,36 @@ with t10:
         st.markdown('#### 下一階段正式PK');st.write('① 原100分　② 技術90%＋外資5%＋投信5%　③ 技術85%＋外資5%＋投信10%　④ 技術80%＋外資10%＋投信10%。')
         st.warning('目前籌碼研究分只用於排序。下一版把法人歷史資料對齊每個訊號日，再跑非重疊交易、年度拆解、PF、Portfolio MDD，才決定正式權重。')
     else:st.write('按「載入 A2.4 籌碼資料」開始。')
+
+with t11:
+    st.subheader('🧪 A2.4 籌碼歷史回測｜四模型 PK')
+    st.caption('比較原100分 vs 三種法人權重。先看是否真的提升勝率、平均報酬、PF與年度穩定度。')
+    c1,c2,c3=st.columns(3)
+    bt_days=c1.slider('法人回測交易日數',20,120,60,10,key='a24_bt_days')
+    bt_score=c2.slider('進場分數門檻',70,95,85,5,key='a24_bt_score')
+    bt_horizon=c3.selectbox('持有交易日',[5,10,20],index=2,key='a24_bt_horizon')
+    if st.button('▶ 執行 A2.4 四模型回測',type='primary',key='run_a24_bt'):
+        with st.spinner('載入歷史法人資料並執行四模型回測...'):
+            hist=load_twse_chip_history(bt_days)
+            trades,summary=run_a24_chip_backtest(result,hist,bt_score,bt_horizon,bt_horizon)
+            st.session_state['a24_trades']=trades;st.session_state['a24_summary']=summary
+    summary=st.session_state.get('a24_summary',pd.DataFrame())
+    trades=st.session_state.get('a24_trades',pd.DataFrame())
+    if summary is not None and not summary.empty:
+        st.markdown('#### 📊 四模型績效總表')
+        st.dataframe(summary,use_container_width=True,hide_index=True)
+        # 基準差異
+        base=summary[summary['模型'].astype(str)=='原100分']
+        if not base.empty:
+            b=base.iloc[0]
+            comp=summary.copy()
+            comp['勝率改善ppt']=comp['勝率%']-b['勝率%']
+            comp['平均報酬改善ppt']=comp['平均報酬%']-b['平均報酬%']
+            comp['PF改善']=comp['PF']-b['PF']
+            st.markdown('#### 🔍 相對原100分改善幅度')
+            st.dataframe(comp[['模型','勝率改善ppt','平均報酬改善ppt','PF改善','年度正報酬比例%']],use_container_width=True,hide_index=True)
+        st.download_button('⬇️ 下載 A2.4 回測交易明細',trades.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_backtest_trades.csv','text/csv')
+        st.download_button('⬇️ 下載 A2.4 四模型總表',summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'A2.4_chip_backtest_summary.csv','text/csv')
+        st.info('判讀原則：若法人模型在「勝率、平均報酬、PF、年度正報酬比例」至少3項同時優於原100分，再考慮正式納入主分數。')
+    else:
+        st.write('按「執行 A2.4 四模型回測」開始比較。')
