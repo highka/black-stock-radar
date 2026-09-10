@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.5.6
-# V3.5.6：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.5.7
+# V3.5.7：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.5.6 Fugle 即時行情層
+# ⚡ V3.5.7 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2230,7 +2230,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.5.6 外資因子證明版 =====
+# ===== V3.5.7 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2420,7 +2420,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.5.6 外資最佳權重驗證 =====
+# ===== V3.5.7 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2506,7 +2506,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.5.6 外資 Gate 驗證 =====
+# ===== V3.5.7 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2648,7 +2648,232 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
     )
     return grid, summary
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.6｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.5.7 外資翻多壓力測試 =====
+# 目的：不再找新條件，只驗證已選出的 Gate 是否跨時間、跨股票池、跨持有期仍有效。
+
+def _v357_gate_mask(z, gate_name):
+    fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
+    fi = pd.to_numeric(z['外資5日強度%'], errors='coerce')
+    flip1 = z.get('外資賣轉買第1天', pd.Series(False,index=z.index)).fillna(False).astype(bool)
+
+    if gate_name == '原技術訊號':
+        return pd.Series(True, index=z.index)
+    if gate_name == '外資賣→買第1天':
+        return flip1
+    if gate_name == '賣→買＋強度≥1%':
+        return flip1 & (fi >= 1.0)
+    if gate_name == '連買1-2天＋強度≥2%':
+        return (fs >= 1) & (fs <= 2) & (fi >= 2.0)
+    return pd.Series(False, index=z.index)
+
+def _v357_forward_return(base, result_df, horizons=(10,20,30,40,60)):
+    """補齊指定持有期報酬欄位。"""
+    if base is None or base.empty:
+        return base
+
+    out = base.copy()
+    pmap = {}
+    for _, rr in result_df.iterrows():
+        code = str(rr['股票']).zfill(4)
+        df = rr.get('_df')
+        if df is not None and not df.empty:
+            x = df.copy()
+            x.index = pd.to_datetime(x.index).tz_localize(None).normalize()
+            pmap[code] = x
+
+    for h in horizons:
+        col = f'報酬{h}日%'
+        if col in out.columns and out[col].notna().any():
+            continue
+        vals = []
+        for _, r in out.iterrows():
+            code = str(r['股票']).zfill(4)
+            dt = pd.Timestamp(r['日期']).normalize()
+            df = pmap.get(code)
+            v = np.nan
+            if df is not None and dt in df.index:
+                pos = df.index.get_loc(dt)
+                if isinstance(pos,(int,np.integer)) and pos + h < len(df):
+                    p0 = float(df['Close'].iloc[pos])
+                    p1 = float(df['Close'].iloc[pos+h])
+                    if p0 > 0:
+                        v = (p1/p0 - 1) * 100
+            vals.append(v)
+        out[col] = vals
+    return out
+
+def _v357_metric_row(trades, retcol):
+    m = _v353_metrics(trades, retcol)
+    yrs, ypos = _v353_year_stats(trades, retcol)
+    m['涵蓋年度數'] = yrs
+    m['年度正報酬比例%'] = ypos
+    return m
+
+def run_v357_stress_test(event_base, thresholds=(75,80,85,90),
+                         horizons=(10,20,30,40,60), min_sample=25):
+    """
+    四組候選：
+    A 原技術100分
+    B 外資賣→買第1天
+    C 賣→買＋強度≥1%
+    D 連買1-2天＋強度≥2%
+    """
+    if event_base is None or event_base.empty:
+        return pd.DataFrame()
+
+    gates = [
+        '原技術訊號',
+        '外資賣→買第1天',
+        '賣→買＋強度≥1%',
+        '連買1-2天＋強度≥2%',
+    ]
+
+    rows = []
+    z = event_base.copy()
+
+    for th in thresholds:
+        for h in horizons:
+            retcol = f'報酬{h}日%'
+            if retcol not in z.columns:
+                continue
+
+            base = z[pd.to_numeric(z['技術分數'], errors='coerce') >= th].copy()
+            if base.empty:
+                continue
+
+            # 同條件基準
+            base['_score'] = base['技術分數']
+            bt = _v353_nonoverlap(base, '_score', th, h)
+            bm = _v357_metric_row(bt, retcol)
+            bn = max(int(bm.get('樣本數',0)), 1)
+
+            for gate in gates:
+                g = base[_v357_gate_mask(base, gate)].copy()
+                if g.empty:
+                    continue
+                g['_score'] = g['技術分數']
+                tr = _v353_nonoverlap(g, '_score', th, h)
+
+                if gate != '原技術訊號' and len(tr) < min_sample:
+                    continue
+
+                m = _v357_metric_row(tr, retcol)
+                rows.append({
+                    'Gate': gate,
+                    '門檻': th,
+                    '持有日': h,
+                    **m,
+                    '訊號保留率%': (m['樣本數']/bn*100) if bn>0 else np.nan,
+                    '勝率改善ppt': m['勝率%']-bm['勝率%'] if pd.notna(bm['勝率%']) else np.nan,
+                    '平均報酬改善ppt': m['平均報酬%']-bm['平均報酬%'] if pd.notna(bm['平均報酬%']) else np.nan,
+                    'PF改善': m['PF']-bm['PF'] if pd.notna(m['PF']) and pd.notna(bm['PF']) else np.nan
+                })
+    return pd.DataFrame(rows)
+
+def _v357_gate_summary(grid):
+    if grid is None or grid.empty:
+        return pd.DataFrame()
+    x = grid[grid['Gate']!='原技術訊號'].copy()
+    if x.empty:
+        return pd.DataFrame()
+
+    x['三項全改善'] = (
+        (x['勝率改善ppt']>0) &
+        (x['平均報酬改善ppt']>0) &
+        (x['PF改善']>0)
+    )
+    x['有效改善'] = x['三項全改善'] & (x['訊號保留率%']>=20)
+
+    s = (
+        x.groupby('Gate', as_index=False)
+        .agg(
+            測試組合數=('Gate','size'),
+            三項全改善比例=('三項全改善',lambda v:v.mean()*100),
+            有效改善比例=('有效改善',lambda v:v.mean()*100),
+            平均訊號保留率=('訊號保留率%','mean'),
+            平均勝率改善ppt=('勝率改善ppt','mean'),
+            平均報酬改善ppt=('平均報酬改善ppt','mean'),
+            平均PF改善=('PF改善','mean'),
+            平均樣本數=('樣本數','mean'),
+            平均CI下限=('95%CI下限%','mean'),
+        )
+    )
+    s['壓力測試通過'] = (
+        (s['三項全改善比例']>=60) &
+        (s['平均勝率改善ppt']>0) &
+        (s['平均報酬改善ppt']>0) &
+        (s['平均PF改善']>0) &
+        (s['平均訊號保留率']>=20)
+    )
+    s['壓力分'] = (
+        s['三項全改善比例']*.08 +
+        s['有效改善比例']*.05 +
+        s['平均勝率改善ppt'] +
+        s['平均報酬改善ppt']*2 +
+        s['平均PF改善']*5 +
+        np.clip(s['平均CI下限'],-10,10)*.25
+    )
+    return s.sort_values(['壓力測試通過','壓力分'], ascending=[False,False])
+
+def _v357_time_split(event_base):
+    """每檔股票按日期切前半 / 後半，降低同一時段最佳化的錯覺。"""
+    if event_base is None or event_base.empty:
+        return pd.DataFrame()
+    parts=[]
+    for code,g in event_base.groupby('股票'):
+        g=g.sort_values('日期').copy()
+        n=len(g)
+        if n<4:
+            continue
+        cut=n//2
+        g['時間樣本']='前半段'
+        g.iloc[cut:, g.columns.get_loc('時間樣本')] = '後半段'
+        parts.append(g)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+def run_v357_time_stability(event_base, thresholds=(75,80,85,90),
+                            horizons=(20,30,40,60), min_sample=20):
+    z=_v357_time_split(event_base)
+    if z.empty:return pd.DataFrame()
+    rows=[]
+    for seg,g in z.groupby('時間樣本'):
+        grid=run_v357_stress_test(g,thresholds,horizons,min_sample)
+        if grid.empty:continue
+        s=_v357_gate_summary(grid)
+        if s.empty:continue
+        s['時間樣本']=seg
+        rows.append(s)
+    return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
+
+def run_v357_stockcount_stability(event_base, symbol_order,
+                                  counts=(50,100,200), thresholds=(75,80,85,90),
+                                  horizons=(20,30,40,60), min_sample=20):
+    """
+    依目前掃描股票順序比較 50/100/200/全部。
+    這不是 bootstrap，但可用來檢查結果是否只靠少數股票撐起來。
+    """
+    if event_base is None or event_base.empty:
+        return pd.DataFrame()
+    symbols=[str(x).zfill(4) for x in symbol_order]
+    levels=[]
+    for n in counts:
+        if len(symbols)>=n:
+            levels.append((str(n),set(symbols[:n])))
+    levels.append(('全部',set(symbols)))
+
+    rows=[]
+    for label,subset in levels:
+        g=event_base[event_base['股票'].astype(str).str.zfill(4).isin(subset)].copy()
+        if g.empty:continue
+        grid=run_v357_stress_test(g,thresholds,horizons,min_sample)
+        s=_v357_gate_summary(grid)
+        if s.empty:continue
+        s['股票池']=label
+        rows.append(s)
+    return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.5.7｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -2714,7 +2939,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.6｜精簡版：保留日常雷達功能＋外資 Gate 驗證；舊回測頁已清除，行情核心沿用 TWSE MI_INDEX＋Fugle/Yahoo 架構。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.5.7｜精簡版：保留日常雷達功能＋外資 Gate 驗證；舊回測頁已清除，行情核心沿用 TWSE MI_INDEX＋Fugle/Yahoo 架構。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -2831,7 +3056,7 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🚪 外資 Gate 驗證'
+    '🧪 V3.5.7 壓力測試'
 ])
 with t1:
     show=result[['股票','名稱','市場','價格','漲跌%','量比','成交量','K','D','黑嚕嚕分數','綜合分數','綜合等級','日期檢查','行情狀態','行情時間','技術狀態','價格來源','訊號']].copy();show['價格']=show['價格'].map(lambda x:f'{x:.2f}');show['漲跌%']=show['漲跌%'].map(lambda x:f'{x:+.2f}%');show['量比']=show['量比'].map(lambda x:f'{x:.2f}x');show['成交量']=show['成交量'].map(lambda x:f'{x:,.0f}');show['K']=show['K'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-');show['D']=show['D'].map(lambda x:f'{x:.1f}' if pd.notna(x) else '-')
@@ -2863,84 +3088,83 @@ with t5:
 
 
 with t6:
-    st.subheader('🔄 V3.5.6 外資翻多 Gate 驗證')
-    st.caption('已完成的舊回測頁已從主介面移除。現在只保留尚未定案的核心問題：外資是否在「由賣轉買」的翻多初期，能成為比單純連買更有效的進場確認條件。')
+    st.subheader('🧪 V3.5.7 外資翻多壓力測試')
+    st.caption('不再新增條件，只驗證既有候選是否跨時間、跨股票池、跨持有週期仍有效。')
 
     st.info(
-        '目前驗證方向：原技術100分不改，法人只當 Gate。'
-        '比較外資買超第1天、連買1-2天、連買3-4天，以及5日買超強度門檻。'
+        '本輪固定比較：①原技術訊號 ②外資賣→買第1天 '
+        '③賣→買＋強度≥1% ④連買1-2天＋強度≥2%。'
+        '這一版重點是反證，不是找更漂亮的參數。'
     )
 
-    c1,c2,c3 = st.columns(3)
-    hist_days = c1.slider('法人歷史交易日數',120,260,220,20,key='v355_days')
-    min_sample = c2.slider('最低有效樣本數',20,120,30,10,key='v355_min')
-    max_events = c3.slider('每檔最多事件日',120,260,220,20,key='v355_events')
+    c1,c2,c3=st.columns(3)
+    hist_days=c1.slider('法人歷史交易日數',160,320,260,20,key='v357_days')
+    min_sample=c2.slider('最低有效樣本數',20,100,25,5,key='v357_min')
+    max_events=c3.slider('每檔最多事件日',160,320,260,20,key='v357_events')
 
-    thresholds = st.multiselect(
+    thresholds=st.multiselect(
         '技術分數門檻',
         [70,75,80,85,90,95],
         default=[75,80,85,90],
-        key='v355_thresholds'
+        key='v357_thresholds'
     )
-    horizons = st.multiselect(
+    horizons=st.multiselect(
         '持有交易日',
-        [10,20,30,40],
-        default=[20,30,40],
-        key='v355_horizons'
+        [10,20,30,40,60],
+        default=[10,20,30,40,60],
+        key='v357_horizons'
     )
 
-    if st.button('▶ 執行 V3.5.6 Gate 驗證', type='primary', key='run_v355'):
-        with st.spinner('建立法人歷史事件並比較各 Gate...'):
-            hist = load_twse_chip_history(hist_days)
-            base = collect_a242_event_base(result, hist, max_events)
-            base = add_v356_flip_features(base, hist)
+    if st.button('▶ 執行 V3.5.7 壓力測試',type='primary',key='run_v357'):
+        with st.spinner('建立歷史事件底表並執行時間 / 股票池 / 持有期壓力測試...'):
+            hist=load_twse_chip_history(hist_days)
+            base=collect_a242_event_base(result,hist,max_events)
+            base=add_v356_flip_features(base,hist)
+            base=_v357_forward_return(base,result,tuple(horizons))
 
-            # 補40日報酬
-            if base is not None and not base.empty and 40 in horizons and '報酬40日%' not in base.columns:
-                pmap = {}
-                for _, rr in result.iterrows():
-                    code = str(rr['股票']).zfill(4)
-                    df = rr.get('_df')
-                    if df is not None and not df.empty:
-                        x = df.copy()
-                        x.index = pd.to_datetime(x.index).tz_localize(None).normalize()
-                        pmap[code] = x
-
-                vals = []
-                for _, r in base.iterrows():
-                    code = str(r['股票']).zfill(4)
-                    dt = pd.Timestamp(r['日期']).normalize()
-                    df = pmap.get(code)
-                    v = np.nan
-                    if df is not None and dt in df.index:
-                        pos = df.index.get_loc(dt)
-                        if isinstance(pos,(int,np.integer)) and pos + 40 < len(df):
-                            p0 = float(df['Close'].iloc[pos])
-                            p1 = float(df['Close'].iloc[pos+40])
-                            v = (p1/p0 - 1) * 100
-                    vals.append(v)
-                base['報酬40日%'] = vals
-
-            grid, summary = run_v355_gate_validation(
+            grid=run_v357_stress_test(
                 base,
                 tuple(thresholds),
                 tuple(horizons),
                 min_sample
             )
-            st.session_state['v355_grid'] = grid
-            st.session_state['v355_summary'] = summary
+            summary=_v357_gate_summary(grid)
 
-    grid = st.session_state.get('v355_grid', pd.DataFrame())
-    summary = st.session_state.get('v355_summary', pd.DataFrame())
+            time_stability=run_v357_time_stability(
+                base,
+                tuple(thresholds),
+                tuple([h for h in horizons if h in [20,30,40,60]]),
+                max(15,min_sample-5)
+            )
+
+            symbol_order=result['股票'].astype(str).str.zfill(4).tolist()
+            stock_stability=run_v357_stockcount_stability(
+                base,
+                symbol_order,
+                counts=(50,100,200),
+                thresholds=tuple(thresholds),
+                horizons=tuple([h for h in horizons if h in [20,30,40,60]]),
+                min_sample=max(15,min_sample-5)
+            )
+
+            st.session_state['v357_grid']=grid
+            st.session_state['v357_summary']=summary
+            st.session_state['v357_time']=time_stability
+            st.session_state['v357_stock']=stock_stability
+
+    grid=st.session_state.get('v357_grid',pd.DataFrame())
+    summary=st.session_state.get('v357_summary',pd.DataFrame())
+    time_stability=st.session_state.get('v357_time',pd.DataFrame())
+    stock_stability=st.session_state.get('v357_stock',pd.DataFrame())
 
     if summary is not None and not summary.empty:
-        st.markdown('### 🏆 Gate 證據排名')
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.markdown('### 🏆 壓力測試總排名')
+        st.dataframe(summary,use_container_width=True,hide_index=True)
 
-        best = summary.iloc[0]
-        st.metric('目前最佳 Gate', str(best['Gate']))
-        st.metric('三項全改善比例', f"{best['三項全改善比例']:.1f}%")
-        st.metric('平均訊號保留率', f"{best['平均訊號保留率']:.1f}%")
+        best=summary.iloc[0]
+        st.metric('目前最穩 Gate',str(best['Gate']))
+        st.metric('三項全改善比例',f"{best['三項全改善比例']:.1f}%")
+        st.metric('平均訊號保留率',f"{best['平均訊號保留率']:.1f}%")
 
         st.write(
             f"平均勝率改善 **{best['平均勝率改善ppt']:+.3f} ppt** ｜ "
@@ -2949,98 +3173,87 @@ with t6:
         )
 
         if grid is not None and not grid.empty:
-            st.markdown('### 🔍 門檻 × 持有期明細')
-            show = grid[grid['Gate'] != '原技術訊號'].copy()
-            show['三項全改善'] = (
-                (show['勝率改善ppt'] > 0) &
-                (show['平均報酬改善ppt'] > 0) &
-                (show['PF改善'] > 0)
+            st.markdown('### ⏳ 持有期壓力測試')
+            g=grid[grid['Gate']!='原技術訊號'].copy()
+            g['三項全改善']=(
+                (g['勝率改善ppt']>0)&
+                (g['平均報酬改善ppt']>0)&
+                (g['PF改善']>0)
             )
+            hold=(g.groupby(['Gate','持有日'],as_index=False)
+                  .agg(
+                      測試組合數=('Gate','size'),
+                      三項全改善比例=('三項全改善',lambda s:s.mean()*100),
+                      平均訊號保留率=('訊號保留率%','mean'),
+                      平均勝率改善ppt=('勝率改善ppt','mean'),
+                      平均報酬改善ppt=('平均報酬改善ppt','mean'),
+                      平均PF改善=('PF改善','mean'),
+                      平均樣本數=('樣本數','mean')
+                  ))
             st.dataframe(
-                show.sort_values(
-                    ['三項全改善','平均報酬改善ppt','PF改善'],
-                    ascending=[False,False,False]
-                ),
+                hold.sort_values(['Gate','持有日']),
                 use_container_width=True,
                 hide_index=True
             )
 
-            st.markdown('### ⏳ Gate × 持有期穩定度')
-            hold = (
-                show.groupby(['Gate','持有日'], as_index=False)
-                .agg(
-                    測試組合數=('Gate','size'),
-                    平均訊號保留率=('訊號保留率%','mean'),
-                    平均勝率改善ppt=('勝率改善ppt','mean'),
-                    平均報酬改善ppt=('平均報酬改善ppt','mean'),
-                    平均PF改善=('PF改善','mean'),
-                )
-            )
+        if time_stability is not None and not time_stability.empty:
+            st.markdown('### 🌓 前半段 vs 後半段')
+            cols=['時間樣本','Gate','測試組合數','三項全改善比例','平均訊號保留率',
+                  '平均勝率改善ppt','平均報酬改善ppt','平均PF改善','平均樣本數','壓力測試通過']
+            keep=[c for c in cols if c in time_stability.columns]
             st.dataframe(
-                hold.sort_values(['Gate','平均報酬改善ppt'], ascending=[True,False]),
+                time_stability[keep].sort_values(['Gate','時間樣本']),
                 use_container_width=True,
                 hide_index=True
             )
+            st.caption('如果前半段有效、後半段失效，就不能視為穩健；前後半都維持正改善才有資格進主策略。')
 
-            st.markdown('### 🔄 翻多 Gate 專屬比較')
-            flip_only = show[
-                show['Gate'].isin([
-                    '賣→買第1天',
-                    '連賣2日→轉買',
-                    '連賣3日→轉買',
-                    '賣→買＋強度≥1%',
-                    '賣→買＋強度≥2%',
-                    '連賣2日→轉買＋強度≥1%',
-                    '連賣2日→轉買＋強度≥2%',
-                    '連買1-2天＋強度≥2%',
-                ])
-            ].copy()
+        if stock_stability is not None and not stock_stability.empty:
+            st.markdown('### 📐 股票池壓力測試｜50 / 100 / 200 / 全部')
+            cols=['股票池','Gate','測試組合數','三項全改善比例','平均訊號保留率',
+                  '平均勝率改善ppt','平均報酬改善ppt','平均PF改善','平均樣本數','壓力測試通過']
+            keep=[c for c in cols if c in stock_stability.columns]
+            st.dataframe(
+                stock_stability[keep].sort_values(['Gate','股票池']),
+                use_container_width=True,
+                hide_index=True
+            )
+            st.caption('若只在50檔有效、擴到200檔或全部就失效，代表結果可能被少數股票支撐。')
 
-            if not flip_only.empty:
-                flip_summary = (
-                    flip_only.groupby('Gate', as_index=False)
-                    .agg(
-                        測試組合數=('Gate','size'),
-                        三項全改善比例=('三項全改善', lambda s:s.mean()*100),
-                        平均訊號保留率=('訊號保留率%','mean'),
-                        平均勝率改善ppt=('勝率改善ppt','mean'),
-                        平均報酬改善ppt=('平均報酬改善ppt','mean'),
-                        平均PF改善=('PF改善','mean'),
-                        平均樣本數=('樣本數','mean')
-                    )
-                    .sort_values(
-                        ['三項全改善比例','平均報酬改善ppt','平均PF改善'],
-                        ascending=[False,False,False]
-                    )
-                )
-                st.dataframe(flip_summary, use_container_width=True, hide_index=True)
-                st.caption('這張表的基準仍是同門檻、同持有期的原技術訊號，因此可以直接比較「翻多」到底有沒有額外價值。')
-
-        st.markdown('### ✅ Gate 正式採用標準')
+        st.markdown('### ✅ V3.5.7 正式採用標準')
         st.write(
-            '① 三項全改善比例 ≥ 60%　'
-            '② 平均勝率/報酬/PF 都 > 0　'
-            '③ 平均訊號保留率 ≥ 20%　'
-            '④ 20/30/40日至少兩個週期為正改善。'
+            '① 總體三項全改善比例 ≥60%　'
+            '② 平均勝率/報酬/PF皆 >0　'
+            '③ 訊號保留率 ≥20%　'
+            '④ 20/30/40/60日至少兩個週期維持正改善　'
+            '⑤ 前半段與後半段都不能明顯失效　'
+            '⑥ 100/200/全部股票池至少兩個層級仍為正改善。'
         )
         st.warning(
-            '如果 Gate 讓績效提高，但只剩不到20%的訊號，會視為過濾過度；'
-            '我們要找的是「品質提升且仍有足夠交易機會」。'
+            '這一版的目的不是讓數字更漂亮，而是故意增加難度。'
+            '如果外資賣→買第1天在這些壓力測試下仍站得住腳，才值得正式加入黑嚕嚕排行榜。'
         )
 
         st.download_button(
-            '⬇️ 下載 V3.5.6 Gate 完整結果',
-            grid.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.6_foreign_flip_gate_grid.csv',
+            '⬇️ 下載 V3.5.7 全部壓力測試',
+            grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.5.7_stress_grid.csv',
             'text/csv',
-            key='dl_v355_grid'
+            key='dl_v357_grid'
         )
         st.download_button(
-            '⬇️ 下載 V3.5.6 Gate 證據排名',
-            summary.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.5.6_foreign_flip_gate_summary.csv',
+            '⬇️ 下載 V3.5.7 時間穩定度',
+            time_stability.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.5.7_time_stability.csv',
             'text/csv',
-            key='dl_v355_summary'
+            key='dl_v357_time'
+        )
+        st.download_button(
+            '⬇️ 下載 V3.5.7 股票池穩定度',
+            stock_stability.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.5.7_stockcount_stability.csv',
+            'text/csv',
+            key='dl_v357_stock'
         )
     else:
-        st.write('按「執行 V3.5.6 Gate 驗證」開始。')
+        st.write('按「執行 V3.5.7 壓力測試」開始。')
