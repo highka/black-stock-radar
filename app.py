@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.0
-# V3.6.0：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.1
+# V3.6.1：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.0 Fugle 即時行情層
+# ⚡ V3.6.1 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2230,7 +2230,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.0 外資因子證明版 =====
+# ===== V3.6.1 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2420,7 +2420,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.0 外資最佳權重驗證 =====
+# ===== V3.6.1 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2506,7 +2506,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.0 外資 Gate 驗證 =====
+# ===== V3.6.1 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2650,7 +2650,91 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.0 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.1 正式版：法人只做資訊標籤，不參與技術100分 =====
+
+def v361_chip_diagnostics(result_df, chip_days=15):
+    """
+    把法人資料管線逐段診斷出來：
+    1. T86歷史筆數 / 最新日
+    2. chip_features 筆數
+    3. 排行榜股票數
+    4. merge成功數
+    5. 外資/投信非空數
+    """
+    out = {
+        'T86歷史筆數':0,
+        'T86股票數':0,
+        'T86最新日期':'—',
+        'chip_features筆數':0,
+        '排行榜股票數':0,
+        'merge成功數':0,
+        '外資有效檔數':0,
+        '投信有效檔數':0,
+        '狀態':''
+    }
+
+    if result_df is None or result_df.empty:
+        out['狀態']='排行榜無資料'
+        return out, pd.DataFrame(), pd.DataFrame()
+
+    out['排行榜股票數']=int(result_df['股票'].astype(str).str.zfill(4).nunique())
+
+    try:
+        hist=load_twse_chip_history(chip_days)
+    except Exception as e:
+        out['狀態']=f'T86讀取失敗：{type(e).__name__}: {str(e)[:100]}'
+        return out, pd.DataFrame(), pd.DataFrame()
+
+    if hist is None or hist.empty:
+        out['狀態']='T86歷史資料為空'
+        return out, pd.DataFrame(), pd.DataFrame()
+
+    out['T86歷史筆數']=len(hist)
+    out['T86股票數']=int(hist['股票'].astype(str).str.zfill(4).nunique())
+    try:
+        out['T86最新日期']=pd.to_datetime(hist['日期']).max().strftime('%Y-%m-%d')
+    except Exception:
+        out['T86最新日期']='日期解析失敗'
+
+    try:
+        pmap={
+            str(r['股票']).zfill(4):r['_df']
+            for _,r in result_df.iterrows()
+            if '_df' in result_df.columns and r.get('_df') is not None
+        }
+        cf=chip_features(hist,pmap)
+    except Exception as e:
+        out['狀態']=f'chip_features失敗：{type(e).__name__}: {str(e)[:100]}'
+        return out, hist, pd.DataFrame()
+
+    if cf is None or cf.empty:
+        out['狀態']='chip_features結果為空'
+        return out, hist, pd.DataFrame()
+
+    cf=cf.copy()
+    cf['股票']=cf['股票'].astype(str).str.zfill(4)
+    out['chip_features筆數']=len(cf)
+
+    base=result_df[['股票']].copy()
+    base['股票']=base['股票'].astype(str).str.zfill(4)
+
+    merged=base.merge(cf,on='股票',how='left')
+    if '籌碼資料日' in merged.columns:
+        out['merge成功數']=int(merged['籌碼資料日'].notna().sum())
+    if '外資連買賣天數' in merged.columns:
+        out['外資有效檔數']=int(pd.to_numeric(merged['外資連買賣天數'],errors='coerce').notna().sum())
+    if '投信連買賣天數' in merged.columns:
+        out['投信有效檔數']=int(pd.to_numeric(merged['投信連買賣天數'],errors='coerce').notna().sum())
+
+    if out['merge成功數']==0:
+        sample_result=base['股票'].head(10).tolist()
+        sample_chip=cf['股票'].head(10).tolist()
+        out['狀態']=f'merge=0；排行榜樣本{sample_result} / 法人樣本{sample_chip}'
+    else:
+        out['狀態']='OK'
+
+    return out, hist, cf
+
 
 def v360_merge_chip_data(result_df, chip_days=15):
     """
@@ -2758,7 +2842,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.0 B：進出場 / 停損停利研究 =====
+# ===== V3.6.1 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -2963,7 +3047,158 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
     return summary,detail_df
 
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.0｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.1 40日風控第二階段 =====
+def _v361_entry_exit_one(df, entry_i, max_hold=40,
+                         initial_stop=None,
+                         ma_confirm=None,
+                         ma_confirm_days=2,
+                         profit_trigger=None,
+                         trailing_after_profit=None,
+                         breakeven_trigger=None):
+    """
+    第二階段風控：
+    - 初始停損
+    - MA跌破需連續確認N日
+    - 獲利達門檻後才啟動移動停利
+    - 獲利達門檻後停損拉到成本附近
+    日K內同時觸發多條件時採保守順序：
+    初始停損 -> 保本 -> 移動停利 -> MA確認 -> 時間出場
+    """
+    if df is None or entry_i >= len(df)-1:
+        return None
+
+    entry=float(df['Close'].iloc[entry_i])
+    if entry<=0:
+        return None
+
+    highest=entry
+    ma_below_count=0
+    exit_i=min(entry_i+max_hold,len(df)-1)
+    exit_price=float(df['Close'].iloc[exit_i])
+    reason=f'時間出場{max_hold}日'
+
+    for j in range(entry_i+1,min(entry_i+max_hold,len(df)-1)+1):
+        high=float(df['High'].iloc[j]); low=float(df['Low'].iloc[j]); close=float(df['Close'].iloc[j])
+        highest=max(highest,high)
+        unreal=(highest/entry-1)*100
+
+        # 1. 初始停損
+        if initial_stop is not None:
+            sl=entry*(1-initial_stop/100)
+            if low<=sl:
+                return {'進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+                        '出場日':pd.Timestamp(df.index[j]).strftime('%Y-%m-%d'),
+                        '進場價':entry,'出場價':sl,'報酬%':(sl/entry-1)*100,
+                        '持有天數':j-entry_i,'出場原因':f'初始停損{initial_stop:g}%'}
+
+        # 2. 保本
+        if breakeven_trigger is not None and unreal>=breakeven_trigger:
+            if low<=entry:
+                return {'進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+                        '出場日':pd.Timestamp(df.index[j]).strftime('%Y-%m-%d'),
+                        '進場價':entry,'出場價':entry,'報酬%':0.0,
+                        '持有天數':j-entry_i,'出場原因':f'獲利{breakeven_trigger:g}%後保本'}
+
+        # 3. 獲利後啟動移動停利
+        if profit_trigger is not None and trailing_after_profit is not None and unreal>=profit_trigger:
+            trail=highest*(1-trailing_after_profit/100)
+            if low<=trail:
+                return {'進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+                        '出場日':pd.Timestamp(df.index[j]).strftime('%Y-%m-%d'),
+                        '進場價':entry,'出場價':trail,'報酬%':(trail/entry-1)*100,
+                        '持有天數':j-entry_i,'出場原因':f'獲利{profit_trigger:g}%後移動停利{trailing_after_profit:g}%'}
+
+        # 4. MA連續確認
+        if ma_confirm is not None:
+            col=f'MA{int(ma_confirm)}'
+            if col in df.columns:
+                ma=pd.to_numeric(df[col].iloc[j],errors='coerce')
+                if pd.notna(ma) and close<float(ma):
+                    ma_below_count += 1
+                else:
+                    ma_below_count = 0
+                if ma_below_count >= ma_confirm_days:
+                    return {'進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+                            '出場日':pd.Timestamp(df.index[j]).strftime('%Y-%m-%d'),
+                            '進場價':entry,'出場價':close,'報酬%':(close/entry-1)*100,
+                            '持有天數':j-entry_i,'出場原因':f'跌破MA{int(ma_confirm)}確認{ma_confirm_days}日'}
+
+    return {'進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+            '出場日':pd.Timestamp(df.index[exit_i]).strftime('%Y-%m-%d'),
+            '進場價':entry,'出場價':exit_price,'報酬%':(exit_price/entry-1)*100,
+            '持有天數':exit_i-entry_i,'出場原因':reason}
+
+def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30):
+    configs=[
+        ('40日純時間',dict(max_hold=40)),
+        ('40日＋初始停損10%',dict(max_hold=40,initial_stop=10)),
+        ('40日＋MA15確認2日',dict(max_hold=40,ma_confirm=15,ma_confirm_days=2)),
+        ('40日＋MA60確認2日',dict(max_hold=40,ma_confirm=60,ma_confirm_days=2)),
+        ('40日＋獲利10%後移動停利8%',dict(max_hold=40,profit_trigger=10,trailing_after_profit=8)),
+        ('40日＋獲利15%後移動停利8%',dict(max_hold=40,profit_trigger=15,trailing_after_profit=8)),
+        ('40日＋獲利10%後保本',dict(max_hold=40,breakeven_trigger=10)),
+        ('40日＋獲利15%後保本',dict(max_hold=40,breakeven_trigger=15)),
+        ('40日＋停損10%＋獲利15%後移動停利8%',
+         dict(max_hold=40,initial_stop=10,profit_trigger=15,trailing_after_profit=8)),
+        ('40日＋停損10%＋MA60確認2日',
+         dict(max_hold=40,initial_stop=10,ma_confirm=60,ma_confirm_days=2)),
+    ]
+
+    rows=[];detail=[]
+    for name,cfg in configs:
+        rets=[];reasons=[];trades=[]
+        for _,rr in result_df.iterrows():
+            code=str(rr['股票']).zfill(4); nm=rr.get('名稱',''); df=rr.get('_df')
+            if df is None or len(df)<270: continue
+            d=indicators(df.copy())
+            if d is None or len(d)<270: continue
+
+            last=-999999
+            for i in range(220,len(d)-61):
+                if i-last<cooldown: continue
+                try: score=float(black_score(d.iloc[:i+1])[0])
+                except Exception: continue
+                if score<score_threshold: continue
+
+                tr=_v361_entry_exit_one(d,i,**cfg)
+                if tr is None: continue
+                rets.append(tr['報酬%']); reasons.append(tr['出場原因'])
+                trades.append({'策略':name,'股票':code,'名稱':nm,'技術分數':score,**tr})
+                last=i
+
+        if len(rets)<min_sample: continue
+        m=_v360_trade_metrics(rets)
+        rs=pd.Series(reasons,dtype=str)
+        rows.append({
+            '策略':name,**m,
+            '停損觸發率%':rs.str.contains('停損',na=False).mean()*100 if len(rs) else np.nan,
+            '保本觸發率%':rs.str.contains('保本',na=False).mean()*100 if len(rs) else np.nan,
+            '移動停利觸發率%':rs.str.contains('移動停利',na=False).mean()*100 if len(rs) else np.nan,
+            'MA確認出場率%':rs.str.contains('確認',na=False).mean()*100 if len(rs) else np.nan,
+        })
+        detail.extend(trades)
+
+    s=pd.DataFrame(rows); ddf=pd.DataFrame(detail)
+    if not s.empty:
+        # 比純時間基準的改善
+        b=s[s['策略']=='40日純時間']
+        if not b.empty:
+            br=b.iloc[0]
+            s['勝率改善ppt']=s['勝率%']-br['勝率%']
+            s['平均報酬改善ppt']=s['平均報酬%']-br['平均報酬%']
+            s['PF改善']=s['PF']-br['PF']
+            s['最大虧損改善ppt']=s['最大單筆虧損%']-br['最大單筆虧損%']
+        s['風控平衡分']=(
+            s['平均報酬%'].fillna(-99)*1.5 +
+            s['PF'].fillna(0)*5 +
+            s['勝率%'].fillna(0)*0.05 +
+            s['最大單筆虧損%'].fillna(-99)*0.30
+        )
+        s=s.sort_values(['風控平衡分','PF','平均報酬%'],ascending=[False,False,False])
+    return s,ddf
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.1｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -3029,7 +3264,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.0｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.1｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -3146,16 +3381,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧭 進出場風控研究'
+    '🧭 3.6.1 風控第二階段'
 ])
 
-# V3.6.0：法人資料僅供閱讀，不改變排序分數。
+# V3.6.1：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.0｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.1｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -3164,6 +3399,25 @@ with t1:
             st.warning(f'🏦 法人資料日：{_v360_chip_date}｜尚未更新至今日 {_today_tw}')
     else:
         st.warning(f'🏦 法人資料狀態：{_v360_chip_date}')
+
+    with st.expander('🩺 法人資料管線診斷', expanded=False):
+        _diag, _hist_diag, _cf_diag = v361_chip_diagnostics(result, chip_days=15)
+        d1,d2,d3,d4 = st.columns(4)
+        d1.metric('T86歷史筆數', _diag.get('T86歷史筆數',0))
+        d2.metric('T86股票數', _diag.get('T86股票數',0))
+        d3.metric('排行榜股票數', _diag.get('排行榜股票數',0))
+        d4.metric('merge成功數', _diag.get('merge成功數',0))
+
+        e1,e2,e3,e4 = st.columns(4)
+        e1.metric('T86最新日期', _diag.get('T86最新日期','—'))
+        e2.metric('chip_features筆數', _diag.get('chip_features筆數',0))
+        e3.metric('外資有效檔數', _diag.get('外資有效檔數',0))
+        e4.metric('投信有效檔數', _diag.get('投信有效檔數',0))
+
+        if _diag.get('狀態') == 'OK':
+            st.success('法人資料管線：OK')
+        else:
+            st.error(f"法人資料管線異常：{_diag.get('狀態','未知')}")
     if '外資狀態' in result.columns:
         with st.expander('🏦 法人籌碼資訊標籤', expanded=False):
             base_cols=[c for c in ['股票','名稱','綜合分數','黑嚕嚕分數','價格','外資狀態','投信狀態'] if c in result.columns]
@@ -3198,95 +3452,70 @@ with t5:
 
 
 
+
 with t6:
-    st.subheader('🧭 V3.6.0 進出場 / 停損停利研究')
-    st.caption('選股模型先不改，專心驗證「選到股票之後怎麼出場」是否能改善實際績效。')
+    st.subheader('🧭 V3.6.1 進出場風控第二階段')
+    st.caption('基準固定40日，目標是降低尾端大虧損，同時盡量保留趨勢股的獲利空間。')
 
     st.info(
-        '本版進場固定為「技術分數達門檻的訊號日收盤」，'
-        '出場分別測：時間出場、固定停損、固定停利、移動停利、跌破MA。'
-        '先找出最有價值的單一出場規則，再進下一版做組合型風控。'
+        '本輪不再廣泛掃描所有出場法，只集中驗證：'
+        '初始停損、MA跌破需連續2日確認、獲利後才啟動移動停利、獲利後保本。'
     )
 
     c1,c2,c3=st.columns(3)
-    score_th=c1.slider('進場技術分數',70,95,85,5,key='v360_score')
-    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v360_cooldown')
-    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v360_min_sample')
+    score_th=c1.slider('進場技術分數',70,95,85,5,key='v361_score')
+    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v361_cd')
+    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v361_min')
 
-    holds=st.multiselect('最大持有日',[10,20,30,40,60],default=[20,30,40],key='v360_holds')
-    stop_losses=st.multiselect('固定停損 %',[3,5,8,10,12],default=[5,8,10],key='v360_sl')
-    take_profits=st.multiselect('固定停利 %',[8,10,15,20,25,30],default=[10,15,20],key='v360_tp')
-    trailing=st.multiselect('移動停利回撤 %',[5,8,10,12,15],default=[8,10],key='v360_tr')
-    ma_exits=st.multiselect('跌破MA出場',[15,30,60,200],default=[15,60,200],key='v360_ma')
+    if st.button('▶ 執行 V3.6.1 風控第二階段',type='primary',key='run_v361'):
+        with st.spinner('執行40日風控第二階段回測...'):
+            s,d=run_v361_risk_lab(result,score_th,cooldown,min_sample)
+            st.session_state['v361_summary']=s
+            st.session_state['v361_detail']=d
 
-    if st.button('▶ 執行 V3.6.0 進出場研究',type='primary',key='run_v360_exit'):
-        with st.spinner('建立歷史技術訊號並測試出場規則...'):
-            summary,detail=run_v360_exit_lab(
-                result,
-                score_threshold=score_th,
-                cooldown=cooldown,
-                max_hold_list=tuple(holds),
-                stop_losses=tuple([None]+stop_losses),
-                take_profits=tuple([None]+take_profits),
-                trailing_list=tuple([None]+trailing),
-                ma_exits=tuple([None]+ma_exits),
-                min_sample=min_sample
-            )
-            st.session_state['v360_exit_summary']=summary
-            st.session_state['v360_exit_detail']=detail
+    s=st.session_state.get('v361_summary',pd.DataFrame())
+    d=st.session_state.get('v361_detail',pd.DataFrame())
 
-    summary=st.session_state.get('v360_exit_summary',pd.DataFrame())
-    detail=st.session_state.get('v360_exit_detail',pd.DataFrame())
-
-    if summary is not None and not summary.empty:
-        st.markdown('### 🏆 出場策略排名')
-        showcols=[
+    if s is not None and not s.empty:
+        st.markdown('### 🏆 40日風控策略排名')
+        cols=[
             '策略','樣本數','勝率%','平均報酬%','中位數%','PF',
-            '平均獲利%','平均虧損%','最大單筆虧損%',
-            '停損觸發率%','停利觸發率%','MA出場率%','風控分'
+            '最大單筆虧損%','勝率改善ppt','平均報酬改善ppt','PF改善',
+            '最大虧損改善ppt','停損觸發率%','保本觸發率%',
+            '移動停利觸發率%','MA確認出場率%','風控平衡分'
         ]
-        showcols=[c for c in showcols if c in summary.columns]
-        st.dataframe(summary[showcols],use_container_width=True,hide_index=True)
+        cols=[c for c in cols if c in s.columns]
+        st.dataframe(s[cols],use_container_width=True,hide_index=True)
 
-        best=summary.iloc[0]
-        st.metric('目前最佳出場策略',str(best['策略']))
-        st.metric('平均報酬',f"{best['平均報酬%']:.2f}%")
-        st.metric('PF',f"{best['PF']:.2f}" if pd.notna(best['PF']) else '—')
-
-        st.markdown('### 🔍 與純時間出場比較')
-        base=summary[summary['策略'].str.startswith('時間出場',na=False)].copy()
+        st.markdown('### 🎯 相對40日純時間出場')
+        base=s[s['策略']=='40日純時間']
         if not base.empty:
-            st.dataframe(
-                base[['策略','樣本數','勝率%','平均報酬%','PF','最大單筆虧損%']],
-                use_container_width=True,
-                hide_index=True
+            b=base.iloc[0]
+            st.write(
+                f"基準：勝率 **{b['勝率%']:.2f}%**｜平均報酬 **{b['平均報酬%']:.2f}%**｜"
+                f"PF **{b['PF']:.2f}**｜最大單筆虧損 **{b['最大單筆虧損%']:.2f}%**"
             )
 
-        st.markdown('### 📌 本版判讀原則')
+        st.markdown('### ✅ 這一輪判讀')
         st.write(
-            '優先找「平均報酬不下降太多，但PF提高、最大單筆虧損縮小」的規則。'
-            '如果某停損讓勝率提升但平均報酬大幅下降，未必值得採用。'
+            '優先找：平均報酬下降有限，但最大單筆虧損明顯縮小，而且PF不惡化太多的策略。'
+            '如果「獲利後才啟動移動停利」能勝過固定停損，會更符合趨勢波段特性。'
         )
         st.warning(
-            '這是日K研究版。停損與停利若同一天都被碰到，程式採保守假設：先算停損。'
-            '尚未加入滑價、手續費、漲跌停與盤中成交順序。'
+            '仍屬日K研究：同日內無法知道High/Low實際先後順序。'
+            '涉及停損/停利的判斷仍採保守估計，尚未含滑價、手續費與漲跌停成交限制。'
         )
 
         st.download_button(
-            '⬇️ 下載出場策略總表',
-            summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.0_exit_strategy_summary.csv',
-            'text/csv',
-            key='dl_v360_exit_summary'
+            '⬇️ 下載 V3.6.1 風控總表',
+            s.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.1_risk_summary.csv','text/csv',key='dl_v361_s'
         )
-
-        if detail is not None and not detail.empty:
+        if d is not None and not d.empty:
             st.download_button(
-                '⬇️ 下載交易明細',
-                detail.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.0_exit_trade_detail.csv',
-                'text/csv',
-                key='dl_v360_exit_detail'
+                '⬇️ 下載 V3.6.1 交易明細',
+                d.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.1_risk_detail.csv','text/csv',key='dl_v361_d'
             )
     else:
-        st.write('設定條件後按「執行 V3.6.0 進出場研究」。')
+        st.write('按「執行 V3.6.1 風控第二階段」開始。')
