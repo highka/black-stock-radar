@@ -4,14 +4,19 @@ import numpy as np
 import yfinance as yf
 import requests
 import re
-import plotly.graph_objects as go
+try:
+    import plotly.graph_objects as go
+    PLOTLY_OK = True
+except ModuleNotFoundError:
+    go = None
+    PLOTLY_OK = False
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.3
-# V3.6.3：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.4
+# V3.6.4：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -49,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.3 Fugle 即時行情層
+# ⚡ V3.6.4 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2322,7 +2327,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.3 外資因子證明版 =====
+# ===== V3.6.4 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2512,7 +2517,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.3 外資最佳權重驗證 =====
+# ===== V3.6.4 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2598,7 +2603,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.3 外資 Gate 驗證 =====
+# ===== V3.6.4 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2742,7 +2747,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.3 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.4 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -2937,7 +2942,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.3 B：進出場 / 停損停利研究 =====
+# ===== V3.6.4 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3143,7 +3148,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.3 40日風控第二階段 =====
+# ===== V3.6.4 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3294,7 +3299,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.3 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.4 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3399,7 +3404,193 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
         s=s.sort_values(['停損平衡分','平均報酬%','PF'],ascending=[False,False,False])
     return s,d
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.3｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.4 停損確認機制驗證 =====
+# 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
+# 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
+
+def _v364_exit_one(df, entry_i, hold=40, mode='time', stop_pct=10):
+    if df is None or entry_i >= len(df)-1:
+        return None
+
+    entry=float(df['Close'].iloc[entry_i])
+    if entry<=0:
+        return None
+
+    end=min(entry_i+hold,len(df)-1)
+    exit_i=end
+    exit_price=float(df['Close'].iloc[end])
+    reason=f'時間出場{hold}日'
+    stop_price=entry*(1-stop_pct/100)
+
+    below_close_count=0
+
+    for j in range(entry_i+1,end+1):
+        low=float(df['Low'].iloc[j])
+        close=float(df['Close'].iloc[j])
+
+        if mode=='intraday':
+            if low<=stop_price:
+                exit_i=j
+                exit_price=stop_price
+                reason=f'盤中停損{stop_pct:g}%'
+                break
+
+        elif mode=='close':
+            if close<=stop_price:
+                exit_i=j
+                exit_price=close
+                reason=f'收盤停損{stop_pct:g}%'
+                break
+
+        elif mode=='close2':
+            if close<=stop_price:
+                below_close_count+=1
+            else:
+                below_close_count=0
+            if below_close_count>=2:
+                exit_i=j
+                exit_price=close
+                reason=f'收盤連2日停損{stop_pct:g}%'
+                break
+
+    ret=(exit_price/entry-1)*100
+
+    # 原40日結果，用來判斷是否誤殺
+    base_ret=(float(df['Close'].iloc[end])/entry-1)*100
+
+    return {
+        '進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+        '出場日':pd.Timestamp(df.index[exit_i]).strftime('%Y-%m-%d'),
+        '進場價':entry,
+        '出場價':exit_price,
+        '報酬%':ret,
+        '原40日報酬%':base_ret,
+        '出場原因':reason,
+        '持有天數':exit_i-entry_i
+    }
+
+def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
+                                   hold=40, min_sample=30):
+    configs=[
+        ('40日純時間','time',10),
+        ('盤中停損10%','intraday',10),
+        ('盤中停損12%','intraday',12),
+        ('收盤停損10%','close',10),
+        ('收盤停損12%','close',12),
+        ('收盤連2日停損10%','close2',10),
+        ('收盤連2日停損12%','close2',12),
+    ]
+
+    rows=[]
+    details=[]
+
+    for name,mode,sl in configs:
+        rets=[]
+        trades=[]
+
+        for _,rr in result_df.iterrows():
+            code=str(rr['股票']).zfill(4)
+            nm=rr.get('名稱','')
+            df=rr.get('_df')
+
+            if df is None or len(df)<270:
+                continue
+
+            d=indicators(df.copy())
+            last=-999999
+
+            for i in range(220,len(d)-hold-1):
+                if i-last<cooldown:
+                    continue
+
+                try:
+                    score=float(black_score(d.iloc[:i+1])[0])
+                except Exception:
+                    continue
+
+                if score<score_threshold:
+                    continue
+
+                tr=_v364_exit_one(d,i,hold=hold,mode=mode,stop_pct=sl)
+                if not tr:
+                    continue
+
+                rets.append(tr['報酬%'])
+                trades.append({
+                    '策略':name,
+                    '股票':code,
+                    '名稱':nm,
+                    '技術分數':score,
+                    **tr
+                })
+                last=i
+
+        if len(rets)<min_sample:
+            continue
+
+        m=_v360_trade_metrics(rets)
+        td=pd.DataFrame(trades)
+
+        triggered=td[~td['出場原因'].astype(str).str.startswith('時間出場')].copy()
+        trigger_rate=(len(triggered)/len(td)*100) if len(td) else np.nan
+
+        false_stop=np.nan
+        if not triggered.empty:
+            false_stop=(pd.to_numeric(triggered['原40日報酬%'],errors='coerce')>0).mean()*100
+
+        avg_hold=pd.to_numeric(td['持有天數'],errors='coerce').mean() if not td.empty else np.nan
+
+        rows.append({
+            '策略':name,
+            '樣本數':m['樣本數'],
+            '勝率%':m['勝率%'],
+            '平均報酬%':m['平均報酬%'],
+            '中位數%':m['中位數%'],
+            'PF':m['PF'],
+            '平均獲利%':m['平均獲利%'],
+            '平均虧損%':m['平均虧損%'],
+            '最大單筆虧損%':m['最大單筆虧損%'],
+            '停損觸發率%':trigger_rate,
+            '被停損但40日後原可獲利比例%':false_stop,
+            '平均持有天數':avg_hold
+        })
+
+        details.extend(trades)
+
+    s=pd.DataFrame(rows)
+    d=pd.DataFrame(details)
+
+    if not s.empty:
+        base=s[s['策略']=='40日純時間']
+        if not base.empty:
+            b=base.iloc[0]
+            s['勝率改善ppt']=s['勝率%']-b['勝率%']
+            s['平均報酬改善ppt']=s['平均報酬%']-b['平均報酬%']
+            s['PF改善']=s['PF']-b['PF']
+            s['最大虧損改善ppt']=s['最大單筆虧損%']-b['最大單筆虧損%']
+            s['報酬保留率%']=np.where(
+                b['平均報酬%']!=0,
+                s['平均報酬%']/b['平均報酬%']*100,
+                np.nan
+            )
+
+        # 強調「保留報酬 + 降低尾端風險 + 少誤殺」
+        s['確認停損分']=(
+            s['報酬保留率%'].fillna(0)*0.20 +
+            s['PF'].fillna(0)*4 +
+            s['最大虧損改善ppt'].fillna(0)*0.35 -
+            s['被停損但40日後原可獲利比例%'].fillna(0)*0.10
+        )
+
+        s=s.sort_values(
+            ['確認停損分','報酬保留率%','PF'],
+            ascending=[False,False,False]
+        )
+
+    return s,d
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.4｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -3465,7 +3656,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.3｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.4｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -3582,16 +3773,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧭 3.6.2 MAE/MFE停損研究'
+    '🧭 3.6.4 停損確認驗證'
 ])
 
-# V3.6.3：法人資料僅供閱讀，不改變排序分數。
+# V3.6.4：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.3｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.4｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -3644,47 +3835,51 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.3：個股主圖改為台股慣用標準K棒（紅漲、綠跌），並保留 MA15 / MA60 / MA200
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=d.index,
-        open=d['Open'],
-        high=d['High'],
-        low=d['Low'],
-        close=d['Close'],
-        name='日K',
-        increasing_line_color='#e53935',
-        increasing_fillcolor='#e53935',
-        decreasing_line_color='#16a34a',
-        decreasing_fillcolor='#16a34a',
-        whiskerwidth=0.35
-    ))
-    if 'MA15' in d.columns:
-        fig.add_trace(go.Scatter(x=d.index,y=d['MA15'],mode='lines',name='MA15',line=dict(width=1.5)))
-    if 'MA60' in d.columns:
-        fig.add_trace(go.Scatter(x=d.index,y=d['MA60'],mode='lines',name='MA60',line=dict(width=1.5)))
-    if 'MA200' in d.columns:
-        fig.add_trace(go.Scatter(x=d.index,y=d['MA200'],mode='lines',name='MA200',line=dict(width=1.8)))
+    # V3.6.4：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    if PLOTLY_OK:
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=d.index,
+            open=d['Open'],
+            high=d['High'],
+            low=d['Low'],
+            close=d['Close'],
+            name='日K',
+            increasing_line_color='#e53935',
+            increasing_fillcolor='#e53935',
+            decreasing_line_color='#16a34a',
+            decreasing_fillcolor='#16a34a',
+            whiskerwidth=0.35
+        ))
+        if 'MA15' in d.columns:
+            fig.add_trace(go.Scatter(x=d.index,y=d['MA15'],mode='lines',name='MA15',line=dict(width=1.5)))
+        if 'MA60' in d.columns:
+            fig.add_trace(go.Scatter(x=d.index,y=d['MA60'],mode='lines',name='MA60',line=dict(width=1.5)))
+        if 'MA200' in d.columns:
+            fig.add_trace(go.Scatter(x=d.index,y=d['MA200'],mode='lines',name='MA200',line=dict(width=1.8)))
 
-    fig.update_layout(
-        height=520,
-        margin=dict(l=10,r=10,t=35,b=10),
-        xaxis_rangeslider_visible=False,
-        hovermode='x unified',
-        legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0),
-        xaxis_title='',
-        yaxis_title='價格',
-        dragmode='pan'
-    )
-    fig.update_xaxes(
-        type='date',
-        rangebreaks=[dict(bounds=['sat','mon'])],
-        showspikes=True,
-        spikemode='across',
-        spikesnap='cursor'
-    )
-    fig.update_yaxes(fixedrange=False,showspikes=True,spikemode='across')
-    st.plotly_chart(fig,use_container_width=True,config={'scrollZoom':True,'displaylogo':False})
+        fig.update_layout(
+            height=520,
+            margin=dict(l=10,r=10,t=35,b=10),
+            xaxis_rangeslider_visible=False,
+            hovermode='x unified',
+            legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0),
+            xaxis_title='',
+            yaxis_title='價格',
+            dragmode='pan'
+        )
+        fig.update_xaxes(
+            type='date',
+            rangebreaks=[dict(bounds=['sat','mon'])],
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor'
+        )
+        fig.update_yaxes(fixedrange=False,showspikes=True,spikemode='across')
+        st.plotly_chart(fig,use_container_width=True,config={'scrollZoom':True,'displaylogo':False})
+    else:
+        st.error('缺少 plotly 套件：請把 plotly 加入 requirements.txt。已暫時改用折線圖備援，避免整個 App 無法啟動。')
+        st.line_chart(d[['Close','MA15','MA60','MA200']].rename(columns={'Close':'股價'}),height=420)
 
     a,b,c,d2,e=st.columns(5)
     a.metric('黑嚕嚕',f"{r['黑嚕嚕分數']}分")
@@ -3694,22 +3889,25 @@ with t4:
     e.metric('MA200',f"{r['MA200']:.2f}")
 
     st.markdown('#### 🔊 成交量')
-    vol_fig=go.Figure()
-    vol_colors=['#e53935' if c>=o else '#16a34a' for o,c in zip(d['Open'],d['Close'])]
-    vol_fig.add_trace(go.Bar(x=d.index,y=d['Volume'],name='成交量',marker_color=vol_colors))
-    if 'VOL_MA20' in d.columns:
-        vol_fig.add_trace(go.Scatter(x=d.index,y=d['VOL_MA20'],mode='lines',name='20日均量',line=dict(width=1.6)))
-    vol_fig.update_layout(
-        height=260,
-        margin=dict(l=10,r=10,t=30,b=10),
-        xaxis_rangeslider_visible=False,
-        hovermode='x unified',
-        legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0),
-        xaxis_title='',
-        yaxis_title='成交量'
-    )
-    vol_fig.update_xaxes(type='date',rangebreaks=[dict(bounds=['sat','mon'])])
-    st.plotly_chart(vol_fig,use_container_width=True,config={'displaylogo':False})
+    if PLOTLY_OK:
+        vol_fig=go.Figure()
+        vol_colors=['#e53935' if c>=o else '#16a34a' for o,c in zip(d['Open'],d['Close'])]
+        vol_fig.add_trace(go.Bar(x=d.index,y=d['Volume'],name='成交量',marker_color=vol_colors))
+        if 'VOL_MA20' in d.columns:
+            vol_fig.add_trace(go.Scatter(x=d.index,y=d['VOL_MA20'],mode='lines',name='20日均量',line=dict(width=1.6)))
+        vol_fig.update_layout(
+            height=260,
+            margin=dict(l=10,r=10,t=30,b=10),
+            xaxis_rangeslider_visible=False,
+            hovermode='x unified',
+            legend=dict(orientation='h',yanchor='bottom',y=1.02,xanchor='left',x=0),
+            xaxis_title='',
+            yaxis_title='成交量'
+        )
+        vol_fig.update_xaxes(type='date',rangebreaks=[dict(bounds=['sat','mon'])])
+        st.plotly_chart(vol_fig,use_container_width=True,config={'displaylogo':False})
+    else:
+        st.line_chart(d[['Volume','VOL_MA20']].rename(columns={'Volume':'成交量','VOL_MA20':'20日均量'}),height=250)
 
     st.markdown('#### 🚨 目前訊號')
     st.info(r['訊號'])
@@ -3726,66 +3924,98 @@ with t5:
 
 
 
+
 with t6:
-    st.subheader('🧭 V3.6.3 MAE/MFE＋停損甜蜜點研究')
-    st.caption('基準固定40日。先看贏家通常會先跌多少，再測7%～15%停損。')
+    st.subheader('🧭 V3.6.4 停損確認機制驗證')
+    st.caption('延續40日趨勢模型：比較「盤中觸價」vs「收盤確認」vs「連續2日收盤確認」，目標是降低誤殺。')
+
+    st.info(
+        '目前固定研究10%與12%兩個候選停損。'
+        '不再擴大量參數，專心回答：停損要不要等收盤、要不要連續2日確認。'
+    )
 
     c1,c2,c3=st.columns(3)
-    score_th=c1.slider('進場技術分數',70,95,85,5,key='v362_score')
-    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v362_cd')
-    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v362_min')
+    score_th=c1.slider('進場技術分數',70,95,85,5,key='v364_score')
+    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v364_cd')
+    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v364_min')
 
-    stops=st.multiselect('測試停損%',[5,6,7,8,9,10,11,12,13,15,18,20],
-                         default=[7,8,9,10,11,12,15],key='v362_stops')
+    if st.button('▶ 執行 V3.6.4 停損確認驗證',type='primary',key='run_v364'):
+        with st.spinner('比較盤中停損、收盤停損與2日確認...'):
+            summary,detail=run_v364_stop_confirmation_lab(
+                result,
+                score_threshold=score_th,
+                cooldown=cooldown,
+                hold=40,
+                min_sample=min_sample
+            )
+            st.session_state['v364_summary']=summary
+            st.session_state['v364_detail']=detail
 
-    if st.button('▶ 執行 V3.6.3 MAE/MFE＋停損研究',type='primary',key='run_v362'):
-        with st.spinner('計算40日MAE/MFE並掃描停損甜蜜點...'):
-            base=collect_v362_base_trades(result,score_th,cooldown,40)
-            profile=v362_mae_profile(base)
-            sweep,detail=run_v362_stop_sweep(result,score_th,cooldown,tuple(stops),40,min_sample)
-            st.session_state['v362_base']=base
-            st.session_state['v362_profile']=profile
-            st.session_state['v362_sweep']=sweep
-            st.session_state['v362_detail']=detail
+    summary=st.session_state.get('v364_summary',pd.DataFrame())
+    detail=st.session_state.get('v364_detail',pd.DataFrame())
 
-    base=st.session_state.get('v362_base',pd.DataFrame())
-    profile=st.session_state.get('v362_profile',pd.DataFrame())
-    sweep=st.session_state.get('v362_sweep',pd.DataFrame())
-    detail=st.session_state.get('v362_detail',pd.DataFrame())
+    if summary is not None and not summary.empty:
+        st.markdown('### 🏆 停損確認策略排名')
+        cols=[
+            '策略','樣本數','勝率%','平均報酬%','中位數%','PF',
+            '最大單筆虧損%','停損觸發率%',
+            '被停損但40日後原可獲利比例%',
+            '平均持有天數','報酬保留率%',
+            '勝率改善ppt','平均報酬改善ppt','PF改善',
+            '最大虧損改善ppt','確認停損分'
+        ]
+        cols=[c for c in cols if c in summary.columns]
+        st.dataframe(summary[cols],use_container_width=True,hide_index=True)
 
-    if profile is not None and not profile.empty:
-        st.markdown('### 🧪 MAE / MFE 結構')
-        st.dataframe(profile,use_container_width=True,hide_index=True)
-        st.caption('若最後獲利族群的MAE常落在 -8%~-10%，8%停損就可能太緊；若多數贏家很少跌破 -8%，才適合更緊停損。')
+        st.markdown('### 📊 10% vs 12%｜盤中 / 收盤 / 2日確認')
+        cmp=summary[summary['策略']!='40日純時間'].copy()
+        if not cmp.empty:
+            st.dataframe(
+                cmp[['策略','勝率%','平均報酬%','PF','最大單筆虧損%',
+                     '停損觸發率%','被停損但40日後原可獲利比例%',
+                     '報酬保留率%']],
+                use_container_width=True,
+                hide_index=True
+            )
 
-    if sweep is not None and not sweep.empty:
-        st.markdown('### 🏆 40日停損甜蜜點排名')
-        cols=['策略','樣本數','勝率%','平均報酬%','中位數%','PF','最大單筆虧損%',
-              '停損觸發率%','被停損但40日後原可獲利比例%','報酬保留率%',
-              '勝率改善ppt','平均報酬改善ppt','PF改善','最大虧損改善ppt','停損平衡分']
-        cols=[c for c in cols if c in sweep.columns]
-        st.dataframe(sweep[cols],use_container_width=True,hide_index=True)
+        st.markdown('### ✅ 這一版的判斷標準')
+        st.write(
+            '最理想不是勝率最高，而是：'
+            '①最大虧損明顯縮小；'
+            '②平均報酬保留率高；'
+            '③PF維持；'
+            '④誤殺比例下降；'
+            '⑤平均持有天數仍足以讓趨勢發展。'
+        )
 
-        st.markdown('### 📈 停損% → 報酬 / PF / 最大虧損')
-        curve=sweep[sweep['停損%'].notna()].sort_values('停損%')
-        if not curve.empty:
-            st.line_chart(curve.set_index('停損%')[['平均報酬%','PF','最大單筆虧損%']])
-
-        pure=sweep[sweep['策略']=='40日純時間']
+        pure=summary[summary['策略']=='40日純時間']
         if not pure.empty:
             b=pure.iloc[0]
-            st.info(f"40日基準：平均報酬 {b['平均報酬%']:.2f}%｜PF {b['PF']:.2f}｜最大單筆虧損 {b['最大單筆虧損%']:.2f}%")
+            st.info(
+                f"40日純時間基準：平均報酬 {b['平均報酬%']:.2f}%｜"
+                f"PF {b['PF']:.2f}｜最大單筆虧損 {b['最大單筆虧損%']:.2f}%"
+            )
 
-        st.markdown('### ✅ 判讀標準')
-        st.write('優先找：最大虧損明顯縮小、平均報酬保留率高、PF不明顯惡化，而且「被停損但40日後原可獲利」比例不要太高。')
-        st.warning('仍是日K研究；固定停損採 Low 觸價即成交，尚未加入跳空穿價、滑價、手續費與漲跌停成交限制。')
+        st.warning(
+            '收盤確認法比盤中觸價更接近「容忍盤中震盪、只在收盤確認轉弱」的波段思路。'
+            '但若遇跳空，實際損失可能超過設定的10%或12%，正式策略還要再加入跳空/滑價模擬。'
+        )
 
-        st.download_button('⬇️ 下載 V3.6.3 停損總表',
-            sweep.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.3_stop_sweep_summary.csv','text/csv',key='dl_v362_s')
-        if base is not None and not base.empty:
-            st.download_button('⬇️ 下載 MAE/MFE 原始資料',
-                base.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.3_MAE_MFE_base.csv','text/csv',key='dl_v362_mae')
+        st.download_button(
+            '⬇️ 下載 V3.6.4 停損確認總表',
+            summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.4_stop_confirmation_summary.csv',
+            'text/csv',
+            key='dl_v364_summary'
+        )
+
+        if detail is not None and not detail.empty:
+            st.download_button(
+                '⬇️ 下載 V3.6.4 交易明細',
+                detail.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.4_stop_confirmation_detail.csv',
+                'text/csv',
+                key='dl_v364_detail'
+            )
     else:
-        st.write('按「執行 V3.6.3 MAE/MFE＋停損研究」開始。')
+        st.write('按「執行 V3.6.4 停損確認驗證」開始。')
