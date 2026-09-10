@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.6
-# V3.6.6：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.7
+# V3.6.7：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -54,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.6 Fugle 即時行情層
+# ⚡ V3.6.7 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2327,7 +2327,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.6 外資因子證明版 =====
+# ===== V3.6.7 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2517,7 +2517,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.6 外資最佳權重驗證 =====
+# ===== V3.6.7 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2603,7 +2603,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.6 外資 Gate 驗證 =====
+# ===== V3.6.7 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2747,7 +2747,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.6 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.7 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -2942,7 +2942,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.6 B：進出場 / 停損停利研究 =====
+# ===== V3.6.7 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3148,7 +3148,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.6 40日風控第二階段 =====
+# ===== V3.6.7 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3299,7 +3299,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.6 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.7 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3405,7 +3405,7 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.6 停損確認機制驗證 =====
+# ===== V3.6.7 停損確認機制驗證 =====
 # 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
 # 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
 
@@ -3591,7 +3591,7 @@ def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.6 贏家路徑 + 時間停損 =====
+# ===== V3.6.7 贏家路徑 + 時間停損 =====
 def collect_v365_paths(result_df, score_threshold=85, cooldown=20, hold=40):
     checkpoints=[5,10,15,20,30,40]
     rows=[]
@@ -3737,7 +3737,7 @@ def v365_time_stop_lab(paths, hard_stop=12):
     return out
 
 
-# ===== V3.6.6 讓贏家奔跑：40日後延伸持有 =====
+# ===== V3.6.7 讓贏家奔跑：40日後延伸持有 =====
 def _v366_exit_trade(df, entry_i, hard_stop=12, base_hold=40,
                      extend_to=40, trend_rule='none', exit_rule='time'):
     """
@@ -3950,7 +3950,340 @@ def run_v366_winner_extension_lab(result_df, score_threshold=85, cooldown=20,
         s = s.sort_values(['奔跑分','平均報酬%','PF'],ascending=[False,False,False])
     return s, detail
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.6｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.7 超級贏家壓力測試 =====
+# 固定驗證目前候選：
+# 基準 = 40日 + 硬停損12%
+# 候選 = D40仍站MA15 -> 延伸到D80
+# 不再調參，專門檢查是否被少數超級飆股撐起來。
+
+def _v367_strategy_detail(result_df, score_threshold=85, cooldown=20, min_sample=30):
+    configs = [
+        ('基準｜40日＋硬停損12%', 40, 'none', 'time'),
+        ('候選｜D40站MA15→D80', 80, 'ma15', 'time'),
+    ]
+
+    details = []
+    max_need = 80
+
+    for strategy, extend_to, trend_rule, exit_rule in configs:
+        for _, rr in result_df.iterrows():
+            code = str(rr['股票']).zfill(4)
+            name = rr.get('名稱','')
+            df = rr.get('_df')
+            if df is None or len(df) < 310:
+                continue
+
+            d = indicators(df.copy())
+            last_entry = -999999
+
+            for i in range(220, len(d)-max_need-1):
+                if i-last_entry < cooldown:
+                    continue
+                try:
+                    score = float(black_score(d.iloc[:i+1])[0])
+                except Exception:
+                    continue
+                if score < score_threshold:
+                    continue
+
+                tr = _v366_exit_trade(
+                    d, i,
+                    hard_stop=12,
+                    base_hold=40,
+                    extend_to=extend_to,
+                    trend_rule=trend_rule,
+                    exit_rule=exit_rule
+                )
+                if not tr:
+                    continue
+
+                details.append({
+                    '策略':strategy,
+                    '股票':code,
+                    '名稱':name,
+                    '技術分數':score,
+                    **tr
+                })
+                last_entry = i
+
+    out = pd.DataFrame(details)
+    if out.empty:
+        return out
+
+    out['進場年'] = pd.to_datetime(out['進場日']).dt.year
+    out['報酬%'] = pd.to_numeric(out['報酬%'], errors='coerce')
+    return out
+
+def _v367_perf(df):
+    if df is None or df.empty:
+        return {
+            '樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數%':np.nan,
+            'PF':np.nan,'總報酬點數':np.nan,'最大單筆虧損%':np.nan
+        }
+
+    r = pd.to_numeric(df['報酬%'], errors='coerce').dropna()
+    if r.empty:
+        return {
+            '樣本數':0,'勝率%':np.nan,'平均報酬%':np.nan,'中位數%':np.nan,
+            'PF':np.nan,'總報酬點數':np.nan,'最大單筆虧損%':np.nan
+        }
+
+    gp = r[r>0].sum()
+    gl = -r[r<0].sum()
+
+    return {
+        '樣本數':len(r),
+        '勝率%':(r>0).mean()*100,
+        '平均報酬%':r.mean(),
+        '中位數%':r.median(),
+        'PF':gp/gl if gl>0 else np.nan,
+        '總報酬點數':r.sum(),
+        '最大單筆虧損%':r.min()
+    }
+
+def v367_remove_top_stress(detail):
+    """
+    各策略各自移除最高報酬前 0 / 1 / 3 / 5 / 10 筆，再重算績效。
+    候選策略若移除Top5後仍明顯優於基準，可信度大幅提升。
+    """
+    if detail is None or detail.empty:
+        return pd.DataFrame()
+
+    rows = []
+    remove_levels = [0,1,3,5,10]
+
+    for strategy, g in detail.groupby('策略'):
+        g = g.sort_values('報酬%', ascending=False).reset_index(drop=True)
+        original_n = len(g)
+
+        for n in remove_levels:
+            if n >= original_n:
+                continue
+            x = g.iloc[n:].copy() if n > 0 else g.copy()
+            m = _v367_perf(x)
+            rows.append({
+                '策略':strategy,
+                '移除最高報酬筆數':n,
+                '原始樣本數':original_n,
+                **m
+            })
+
+    stress = pd.DataFrame(rows)
+
+    if not stress.empty:
+        base = stress[stress['策略'].str.startswith('基準｜')][
+            ['移除最高報酬筆數','平均報酬%','PF','勝率%']
+        ].rename(columns={
+            '平均報酬%':'基準平均報酬%',
+            'PF':'基準PF',
+            '勝率%':'基準勝率%'
+        })
+
+        stress = stress.merge(base, on='移除最高報酬筆數', how='left')
+        stress['相對基準平均報酬改善ppt'] = stress['平均報酬%'] - stress['基準平均報酬%']
+        stress['相對基準PF改善'] = stress['PF'] - stress['基準PF']
+        stress['相對基準勝率改善ppt'] = stress['勝率%'] - stress['基準勝率%']
+
+    return stress
+
+def v367_profit_concentration(detail):
+    """
+    檢查獲利是否過度集中在少數交易 / 少數股票。
+    """
+    if detail is None or detail.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    trade_rows = []
+    stock_rows = []
+
+    for strategy, g in detail.groupby('策略'):
+        pos = g[g['報酬%']>0].copy()
+        pos = pos.sort_values('報酬%', ascending=False)
+        total_profit = pos['報酬%'].sum()
+
+        def share(n):
+            if total_profit <= 0 or pos.empty:
+                return np.nan
+            return pos.head(n)['報酬%'].sum()/total_profit*100
+
+        trade_rows.append({
+            '策略':strategy,
+            '正報酬交易數':len(pos),
+            'Top1獲利貢獻率%':share(1),
+            'Top3獲利貢獻率%':share(3),
+            'Top5獲利貢獻率%':share(5),
+            'Top10獲利貢獻率%':share(10)
+        })
+
+        by_stock = (
+            g.groupby(['股票','名稱'], as_index=False)['報酬%']
+            .sum()
+            .sort_values('報酬%', ascending=False)
+        )
+        positive_stock = by_stock[by_stock['報酬%']>0].copy()
+        total_stock_profit = positive_stock['報酬%'].sum()
+
+        if total_stock_profit > 0 and not positive_stock.empty:
+            top1 = positive_stock.head(1)['報酬%'].sum()/total_stock_profit*100
+            top3 = positive_stock.head(3)['報酬%'].sum()/total_stock_profit*100
+            top5 = positive_stock.head(5)['報酬%'].sum()/total_stock_profit*100
+        else:
+            top1=top3=top5=np.nan
+
+        stock_rows.append({
+            '策略':strategy,
+            '獲利股票數':len(positive_stock),
+            'Top1股票獲利貢獻率%':top1,
+            'Top3股票獲利貢獻率%':top3,
+            'Top5股票獲利貢獻率%':top5
+        })
+
+    return pd.DataFrame(trade_rows), pd.DataFrame(stock_rows)
+
+def v367_yearly_stability(detail):
+    if detail is None or detail.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (strategy, year), g in detail.groupby(['策略','進場年']):
+        m = _v367_perf(g)
+        rows.append({'策略':strategy,'年度':int(year),**m})
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    base = out[out['策略'].str.startswith('基準｜')][
+        ['年度','平均報酬%','PF','勝率%']
+    ].rename(columns={
+        '平均報酬%':'基準平均報酬%',
+        'PF':'基準PF',
+        '勝率%':'基準勝率%'
+    })
+
+    out = out.merge(base,on='年度',how='left')
+    out['平均報酬改善ppt'] = out['平均報酬%'] - out['基準平均報酬%']
+    out['PF改善'] = out['PF'] - out['基準PF']
+    out['勝率改善ppt'] = out['勝率%'] - out['基準勝率%']
+    return out
+
+def v367_stockpool_stability(result_df, score_threshold=85, cooldown=20):
+    """
+    依目前排行榜順序測 50 / 100 / 200 / 全部。
+    若目前 result 本身不足某層級，自動略過。
+    """
+    if result_df is None or result_df.empty:
+        return pd.DataFrame()
+
+    levels = [50,100,200,len(result_df)]
+    seen = set()
+    rows = []
+
+    for n in levels:
+        n = min(n, len(result_df))
+        if n in seen or n < 10:
+            continue
+        seen.add(n)
+
+        sub = result_df.head(n).copy()
+        detail = _v367_strategy_detail(sub, score_threshold, cooldown, min_sample=10)
+        if detail.empty:
+            continue
+
+        for strategy, g in detail.groupby('策略'):
+            m = _v367_perf(g)
+            rows.append({
+                '股票池': '全部' if n==len(result_df) else str(n),
+                '股票數': n,
+                '策略':strategy,
+                **m
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    base = out[out['策略'].str.startswith('基準｜')][
+        ['股票池','平均報酬%','PF','勝率%']
+    ].rename(columns={
+        '平均報酬%':'基準平均報酬%',
+        'PF':'基準PF',
+        '勝率%':'基準勝率%'
+    })
+
+    out = out.merge(base,on='股票池',how='left')
+    out['平均報酬改善ppt'] = out['平均報酬%'] - out['基準平均報酬%']
+    out['PF改善'] = out['PF'] - out['基準PF']
+    out['勝率改善ppt'] = out['勝率%'] - out['基準勝率%']
+    return out
+
+def v367_final_verdict(top_stress, trade_conc, stock_conc, yearly, stockpool):
+    """
+    自動給研究結論，不直接宣告正式策略，只分：
+    通過 / 邊界 / 未通過。
+    """
+    score = 0
+    notes = []
+
+    # 1) Top5剔除後仍優於基準
+    cand5 = top_stress[
+        (top_stress['策略'].str.startswith('候選｜')) &
+        (top_stress['移除最高報酬筆數']==5)
+    ]
+    if not cand5.empty:
+        r = cand5.iloc[0]
+        if r['相對基準平均報酬改善ppt'] > 0 and r['相對基準PF改善'] >= 0:
+            score += 2
+            notes.append('✅ 移除Top5後，平均報酬與PF仍優於基準')
+        elif r['相對基準平均報酬改善ppt'] > 0:
+            score += 1
+            notes.append('🟡 移除Top5後報酬仍優於基準，但PF未同步改善')
+        else:
+            notes.append('❌ 移除Top5後已失去平均報酬優勢')
+
+    # 2) Top5交易獲利貢獻率
+    tc = trade_conc[trade_conc['策略'].str.startswith('候選｜')]
+    if not tc.empty:
+        s = float(tc.iloc[0]['Top5獲利貢獻率%'])
+        if s < 50:
+            score += 1
+            notes.append(f'✅ Top5交易獲利貢獻率 {s:.1f}% < 50%')
+        else:
+            notes.append(f'🟡 Top5交易獲利貢獻率 {s:.1f}%，獲利偏集中')
+
+    # 3) 年度
+    yc = yearly[yearly['策略'].str.startswith('候選｜')].copy()
+    if not yc.empty:
+        valid = yc[pd.to_numeric(yc['平均報酬改善ppt'],errors='coerce').notna()]
+        pos = (valid['平均報酬改善ppt']>0).mean()*100 if len(valid) else np.nan
+        if pd.notna(pos) and pos >= 60:
+            score += 1
+            notes.append(f'✅ {pos:.1f}% 年度平均報酬優於基準')
+        else:
+            notes.append(f'🟡 跨年度優勢不足（正改善年度 {pos:.1f}%）' if pd.notna(pos) else '🟡 年度資料不足')
+
+    # 4) 股票池
+    pc = stockpool[stockpool['策略'].str.startswith('候選｜')].copy()
+    if not pc.empty:
+        valid = pc[pd.to_numeric(pc['平均報酬改善ppt'],errors='coerce').notna()]
+        pos = (valid['平均報酬改善ppt']>0).mean()*100 if len(valid) else np.nan
+        if pd.notna(pos) and pos >= 75:
+            score += 1
+            notes.append(f'✅ {pos:.1f}% 股票池層級平均報酬優於基準')
+        else:
+            notes.append(f'🟡 股票池穩定度不足（正改善層級 {pos:.1f}%）' if pd.notna(pos) else '🟡 股票池資料不足')
+
+    if score >= 5:
+        verdict = '🟢 通過壓力測試'
+    elif score >= 3:
+        verdict = '🟡 邊界通過，仍需保守'
+    else:
+        verdict = '🔴 未通過壓力測試'
+
+    return verdict, notes
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.7｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -4016,7 +4349,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.6｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.7｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -4133,16 +4466,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🏃 3.6.6 讓贏家奔跑'
+    '🧨 3.6.7 超級贏家壓測'
 ])
 
-# V3.6.6：法人資料僅供閱讀，不改變排序分數。
+# V3.6.7：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.6｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.7｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -4195,7 +4528,7 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.6：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    # V3.6.7：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
     if PLOTLY_OK:
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -4287,76 +4620,113 @@ with t5:
 
 
 with t6:
-    st.subheader('🏃 V3.6.6 讓贏家奔跑｜40日後延伸持有')
-    st.caption('V3.6.5 已證明 D10/D15/D20 時間停損沒有優勢；本版改驗證：D40仍維持強趨勢的股票，是否值得續抱到 D60 / D80。')
+    st.subheader('🧨 V3.6.7 超級贏家壓力測試')
+    st.caption('不再找更漂亮參數。固定比較「40日＋12%硬停損」與「D40站MA15→D80」，故意移除超級贏家、拆年度、拆股票池，看策略能不能活下來。')
 
-    st.success('目前研究基準：黑嚕嚕訊號進場 → 盤中 -12% 硬停損 → 一般股票 D40 出場 → D40 強勢股才允許延伸。')
+    st.info(
+        '本版固定候選，不調MA、不調D80：'
+        '基準＝40日＋硬停損12%；'
+        '候選＝D40仍站MA15才延伸到D80。'
+    )
 
     c1,c2,c3=st.columns(3)
-    score_th=c1.slider('進場技術分數',70,95,85,5,key='v366_score')
-    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v366_cd')
-    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v366_min')
+    score_th=c1.slider('進場技術分數',70,95,85,5,key='v367_score')
+    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v367_cd')
+    min_sample=c3.slider('最低有效樣本數',20,150,30,10,key='v367_min')
 
-    if st.button('▶ 執行 V3.6.6 贏家延伸驗證',type='primary',key='run_v366'):
-        with st.spinner('逐日模擬 -12%硬停損、D40趨勢判斷與D60/D80延伸...'):
-            summary,detail=run_v366_winner_extension_lab(
-                result,score_threshold=score_th,cooldown=cooldown,
-                hard_stop=12,min_sample=min_sample
+    if st.button('▶ 執行 V3.6.7 超級贏家壓力測試',type='primary',key='run_v367'):
+        with st.spinner('移除Top贏家、拆年度、拆股票池並驗證策略集中度...'):
+            detail=_v367_strategy_detail(result,score_th,cooldown,min_sample)
+            topstress=v367_remove_top_stress(detail)
+            trade_conc,stock_conc=v367_profit_concentration(detail)
+            yearly=v367_yearly_stability(detail)
+            stockpool=v367_stockpool_stability(result,score_th,cooldown)
+            verdict,notes=v367_final_verdict(
+                topstress,trade_conc,stock_conc,yearly,stockpool
             )
-            st.session_state['v366_summary']=summary
-            st.session_state['v366_detail']=detail
 
-    summary=st.session_state.get('v366_summary',pd.DataFrame())
-    detail=st.session_state.get('v366_detail',pd.DataFrame())
+            st.session_state['v367_detail']=detail
+            st.session_state['v367_topstress']=topstress
+            st.session_state['v367_trade_conc']=trade_conc
+            st.session_state['v367_stock_conc']=stock_conc
+            st.session_state['v367_yearly']=yearly
+            st.session_state['v367_stockpool']=stockpool
+            st.session_state['v367_verdict']=verdict
+            st.session_state['v367_notes']=notes
 
-    if summary is not None and not summary.empty:
-        st.markdown('### 🏆 40日後延伸策略排名')
-        cols=[
-            '策略','樣本數','勝率%','平均報酬%','中位數%','PF','最大單筆虧損%',
-            '延伸比例%','延伸股D40平均報酬%','延伸股最終平均報酬%',
-            '延伸增加報酬ppt','延伸後低於D40報酬比例%','平均持有天數',
-            '勝率改善ppt','平均報酬改善ppt','PF改善','奔跑分'
+    detail=st.session_state.get('v367_detail',pd.DataFrame())
+    topstress=st.session_state.get('v367_topstress',pd.DataFrame())
+    trade_conc=st.session_state.get('v367_trade_conc',pd.DataFrame())
+    stock_conc=st.session_state.get('v367_stock_conc',pd.DataFrame())
+    yearly=st.session_state.get('v367_yearly',pd.DataFrame())
+    stockpool=st.session_state.get('v367_stockpool',pd.DataFrame())
+    verdict=st.session_state.get('v367_verdict','')
+    notes=st.session_state.get('v367_notes',[])
+
+    if topstress is not None and not topstress.empty:
+        st.markdown('### 🧪 ① 移除超級贏家後還活不活')
+        showcols=[
+            '策略','移除最高報酬筆數','樣本數','勝率%','平均報酬%','中位數%',
+            'PF','最大單筆虧損%','相對基準平均報酬改善ppt',
+            '相對基準PF改善','相對基準勝率改善ppt'
         ]
-        st.dataframe(summary[[c for c in cols if c in summary.columns]],
+        st.dataframe(topstress[[c for c in showcols if c in topstress.columns]],
+                     use_container_width=True,hide_index=True)
+        st.caption('最重要看「移除Top5」：候選若仍比同樣移除Top5的基準好，代表優勢不是只靠少數怪物股。')
+
+    if trade_conc is not None and not trade_conc.empty:
+        st.markdown('### 🎯 ② 獲利集中度')
+        st.dataframe(trade_conc,use_container_width=True,hide_index=True)
+        st.dataframe(stock_conc,use_container_width=True,hide_index=True)
+        st.caption('Top5交易或Top5股票獲利貢獻率越高，代表策略越依賴少數超級贏家。')
+
+    if yearly is not None and not yearly.empty:
+        st.markdown('### 📅 ③ 年度壓力測試')
+        cols=['策略','年度','樣本數','勝率%','平均報酬%','中位數%','PF',
+              '平均報酬改善ppt','PF改善','勝率改善ppt']
+        st.dataframe(yearly[[c for c in cols if c in yearly.columns]],
                      use_container_width=True,hide_index=True)
 
-        st.markdown('### 🔎 我們真正要看的四個數字')
+    if stockpool is not None and not stockpool.empty:
+        st.markdown('### 📐 ④ 股票池壓力測試｜50 / 100 / 200 / 全部')
+        cols=['股票池','股票數','策略','樣本數','勝率%','平均報酬%','中位數%','PF',
+              '平均報酬改善ppt','PF改善','勝率改善ppt']
+        st.dataframe(stockpool[[c for c in cols if c in stockpool.columns]],
+                     use_container_width=True,hide_index=True)
+
+    if verdict:
+        st.markdown('### 🧾 V3.6.7 自動判定')
+        if verdict.startswith('🟢'):
+            st.success(verdict)
+        elif verdict.startswith('🟡'):
+            st.warning(verdict)
+        else:
+            st.error(verdict)
+
+        for n in notes:
+            st.write(n)
+
+        st.markdown('### ✅ 本版正式門檻')
         st.write(
-            '①「平均報酬改善ppt」要 > 0；'
-            '②「PF改善」最好 ≥ 0；'
-            '③「延伸增加報酬ppt」要明顯為正；'
-            '④「延伸後低於D40報酬比例」不能太高。'
+            '至少要做到：'
+            '①移除最高報酬Top5後，候選平均報酬仍優於基準；'
+            '②PF不要明顯失去優勢；'
+            '③不能只靠單一年度；'
+            '④擴大股票池後仍維持正改善。'
         )
 
-        best=summary.iloc[0]
-        st.info(
-            f"目前排名第一：{best['策略']}｜平均報酬 {best['平均報酬%']:.2f}%｜"
-            f"PF {best['PF']:.2f}｜相對基準平均報酬改善 {best.get('平均報酬改善ppt',np.nan):.2f} ppt｜"
-            f"延伸比例 {best['延伸比例%']:.1f}%"
-        )
-
-        st.markdown('### 🧪 出場原因分布')
-        if detail is not None and not detail.empty:
-            reason=(detail.groupby(['策略','出場原因']).size()
-                    .reset_index(name='筆數'))
-            reason['比例%']=reason.groupby('策略')['筆數'].transform(lambda x:x/x.sum()*100)
-            st.dataframe(reason,use_container_width=True,hide_index=True)
-
-            st.download_button(
-                '⬇️ 下載 V3.6.6 交易明細',
-                detail.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.6_winner_extension_detail.csv','text/csv',key='dl_v366_detail'
-            )
-
+    if detail is not None and not detail.empty:
         st.download_button(
-            '⬇️ 下載 V3.6.6 延伸策略總表',
-            summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.6_winner_extension_summary.csv','text/csv',key='dl_v366_summary'
+            '⬇️ 下載 V3.6.7 交易明細',
+            detail.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.7_trade_detail.csv','text/csv',key='dl_v367_detail'
+        )
+    if topstress is not None and not topstress.empty:
+        st.download_button(
+            '⬇️ 下載 V3.6.7 Top贏家壓力測試',
+            topstress.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.7_topwinner_stress.csv','text/csv',key='dl_v367_top'
         )
 
-        st.warning(
-            '判斷原則：如果延伸策略只是讓少數超級飆股把平均值拉高，但PF下降、'
-            '或多數延伸交易最後吐回D40獲利，就不採用。只有跨樣本仍同時改善平均報酬與PF，才值得進正式策略。'
-        )
-    else:
-        st.write('按「執行 V3.6.6 贏家延伸驗證」開始。')
+    if not verdict:
+        st.write('按「執行 V3.6.7 超級贏家壓力測試」開始。')
