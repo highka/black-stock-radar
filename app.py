@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.1
-# V3.6.1：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.2
+# V3.6.2：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -48,7 +48,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.1 Fugle 即時行情層
+# ⚡ V3.6.2 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -1907,24 +1907,98 @@ def run_a235_portfolio(history, strategy_name, min_score, horizon,
 # ===== A2.4 籌碼實驗室 C版：先研究，不改原100分 =====
 def _chip_num(v): return pd.to_numeric(str(v).replace(',','').strip(),errors='coerce')
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_twse_t86_day(date_yyyymmdd):
+def load_twse_t86_day(date_yyyymmdd, return_status=False):
     cols=['日期','股票','名稱','外資買賣超股數','投信買賣超股數']
-    try:
-        r=requests.get('https://www.twse.com.tw/rwd/zh/fund/T86',params={'date':date_yyyymmdd,'response':'json','selectType':'ALLBUT0999'},headers={'User-Agent':'Mozilla/5.0'},timeout=20)
-        r.raise_for_status();x=r.json();fields=x.get('fields',[]);data=x.get('data',[])
-        def ix(*ks):
-            for i,f in enumerate(fields):
-                if all(k in f for k in ks):return i
-            return None
-        ic,inn,iff,itt=ix('證券代號'),ix('證券名稱'),ix('外陸資買賣超股數','不含外資自營商'),ix('投信買賣超股數')
-        if None in (ic,inn,iff,itt):return pd.DataFrame(columns=cols)
-        rows=[]
-        for a in data:
-            code=str(a[ic]).strip()
-            if re.fullmatch(r'\d{4,6}',code):
-                rows.append({'日期':pd.to_datetime(date_yyyymmdd),'股票':code.zfill(4),'名稱':str(a[inn]).strip(),'外資買賣超股數':_chip_num(a[iff]),'投信買賣超股數':_chip_num(a[itt])})
-        return pd.DataFrame(rows,columns=cols)
-    except Exception:return pd.DataFrame(columns=cols)
+    endpoints=[
+        'https://www.twse.com.tw/rwd/zh/fund/T86',
+        'https://www.twse.com.tw/fund/T86',
+    ]
+    headers={
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        'Accept':'application/json,text/plain,*/*',
+        'Referer':'https://www.twse.com.tw/'
+    }
+    logs=[]
+
+    def find_idx(fields,*parts):
+        for i,f in enumerate(fields):
+            fs=str(f).replace(' ','')
+            if all(p.replace(' ','') in fs for p in parts):
+                return i
+        return None
+
+    def extract_table(x):
+        cands=[]
+        if isinstance(x,dict):
+            if isinstance(x.get('fields'),list) and isinstance(x.get('data'),list):
+                cands.append((x.get('fields',[]),x.get('data',[]),'top-level'))
+            tables=x.get('tables',[])
+            if isinstance(tables,list):
+                for tb in tables:
+                    if isinstance(tb,dict):
+                        cands.append((tb.get('fields',[]),tb.get('data',[]),'tables'))
+        for fields,data,mode in cands:
+            txt='|'.join(map(str,fields))
+            if fields and data and '證券代號' in txt and '投信買賣超股數' in txt and '外陸資買賣超股數' in txt:
+                return fields,data,mode
+        return [],[],'none'
+
+    for url in endpoints:
+        try:
+            r=requests.get(
+                url,
+                params={'date':date_yyyymmdd,'response':'json','selectType':'ALLBUT0999'},
+                headers=headers,timeout=20
+            )
+            logs.append(f"{url.split('twse.com.tw')[-1]} HTTP {r.status_code}")
+            if r.status_code!=200:
+                continue
+
+            try:
+                x=r.json()
+            except Exception as e:
+                logs.append(f"JSON解析失敗:{type(e).__name__}")
+                continue
+
+            fields,data,mode=extract_table(x)
+            logs.append(f"stat={x.get('stat','—')} mode={mode} fields={len(fields)} rows={len(data)}")
+            if not fields or not data:
+                continue
+
+            ic=find_idx(fields,'證券代號')
+            inn=find_idx(fields,'證券名稱')
+            iff=find_idx(fields,'外陸資買賣超股數')
+            itt=find_idx(fields,'投信買賣超股數')
+            if None in (ic,inn,iff,itt):
+                logs.append('必要欄位索引失敗')
+                continue
+
+            rows=[]
+            for a in data:
+                if not isinstance(a,(list,tuple)) or len(a)<=max(ic,inn,iff,itt):
+                    continue
+                code=str(a[ic]).strip()
+                if re.fullmatch(r'\d{4,6}',code):
+                    rows.append({
+                        '日期':pd.to_datetime(date_yyyymmdd),
+                        '股票':code.zfill(4),
+                        '名稱':str(a[inn]).strip(),
+                        '外資買賣超股數':_chip_num(a[iff]),
+                        '投信買賣超股數':_chip_num(a[itt]),
+                    })
+
+            df=pd.DataFrame(rows,columns=cols)
+            if not df.empty:
+                status='｜'.join(logs[-3:])+f'｜成功 {len(df)} 筆'
+                return (df,status) if return_status else df
+
+        except Exception as e:
+            logs.append(f"{url.split('twse.com.tw')[-1]} {type(e).__name__}:{str(e)[:70]}")
+
+    empty=pd.DataFrame(columns=cols)
+    status='｜'.join(logs[-8:]) if logs else 'T86 無回應'
+    return (empty,status) if return_status else empty
+
 def recent_weekdays(n):
     d=taiwan_now().date();out=[]
     while len(out)<n:
@@ -1932,14 +2006,31 @@ def recent_weekdays(n):
         d-=timedelta(days=1)
     return list(reversed(out))
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_twse_chip_history(days=15):
-    parts=[]
-    for d in recent_weekdays(days+8):
-        x=load_twse_t86_day(d.strftime('%Y%m%d'))
-        if not x.empty:parts.append(x)
-    if not parts:return pd.DataFrame()
-    z=pd.concat(parts,ignore_index=True).sort_values(['股票','日期']);valid=sorted(z['日期'].unique())[-days:]
-    return z[z['日期'].isin(valid)].copy()
+def load_twse_chip_history(days=15, return_status=False):
+    parts=[];logs=[]
+    now=taiwan_now()
+    candidates=recent_weekdays(days+15)
+    if now.weekday()<5 and now.hour<18:
+        today=pd.Timestamp(now.date())
+        candidates=[d for d in candidates if d.normalize()!=today.normalize()]
+
+    for d in candidates:
+        x,status=load_twse_t86_day(d.strftime('%Y%m%d'),return_status=True)
+        logs.append(f"{d.strftime('%Y-%m-%d')} {status}")
+        if x is not None and not x.empty:
+            parts.append(x)
+
+    if not parts:
+        empty=pd.DataFrame(columns=['日期','股票','名稱','外資買賣超股數','投信買賣超股數'])
+        status='最近查詢皆無資料；'+('｜'.join(logs[-5:]) if logs else '無查詢紀錄')
+        return (empty,status) if return_status else empty
+
+    z=pd.concat(parts,ignore_index=True).sort_values(['股票','日期'])
+    valid=sorted(pd.to_datetime(z['日期']).dt.normalize().unique())[-days:]
+    out=z[pd.to_datetime(z['日期']).dt.normalize().isin(valid)].copy()
+    latest=pd.to_datetime(out['日期']).max().strftime('%Y-%m-%d')
+    status=f'成功：{len(out):,}筆 / {out["股票"].nunique():,}檔 / 最新{latest}'
+    return (out,status) if return_status else out
 def signed_streak(vals):
     s=pd.Series(vals).dropna().astype(float)
     if s.empty or s.iloc[-1]==0:return 0
@@ -2230,7 +2321,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.1 外資因子證明版 =====
+# ===== V3.6.2 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2420,7 +2511,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.1 外資最佳權重驗證 =====
+# ===== V3.6.2 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2506,7 +2597,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.1 外資 Gate 驗證 =====
+# ===== V3.6.2 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2650,7 +2741,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.1 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.2 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -2670,6 +2761,7 @@ def v361_chip_diagnostics(result_df, chip_days=15):
         'merge成功數':0,
         '外資有效檔數':0,
         '投信有效檔數':0,
+        'T86抓取狀態':'',
         '狀態':''
     }
 
@@ -2680,13 +2772,15 @@ def v361_chip_diagnostics(result_df, chip_days=15):
     out['排行榜股票數']=int(result_df['股票'].astype(str).str.zfill(4).nunique())
 
     try:
-        hist=load_twse_chip_history(chip_days)
+        hist,_t86_status=load_twse_chip_history(chip_days,return_status=True)
     except Exception as e:
         out['狀態']=f'T86讀取失敗：{type(e).__name__}: {str(e)[:100]}'
         return out, pd.DataFrame(), pd.DataFrame()
 
+    out['T86抓取狀態']=_t86_status
+
     if hist is None or hist.empty:
-        out['狀態']='T86歷史資料為空'
+        out['狀態']=f'T86歷史資料為空｜{_t86_status}'
         return out, pd.DataFrame(), pd.DataFrame()
 
     out['T86歷史筆數']=len(hist)
@@ -2746,12 +2840,12 @@ def v360_merge_chip_data(result_df, chip_days=15):
         return result_df, pd.DataFrame(), '無排行榜資料'
 
     try:
-        hist = load_twse_chip_history(chip_days)
+        hist, _hist_status = load_twse_chip_history(chip_days, return_status=True)
     except Exception as e:
         return result_df.copy(), pd.DataFrame(), f'法人資料讀取失敗：{type(e).__name__}: {str(e)[:100]}'
 
     if hist is None or hist.empty:
-        return result_df.copy(), pd.DataFrame(), 'TWSE T86 無有效資料'
+        return result_df.copy(), pd.DataFrame(), f'TWSE T86 無有效資料｜{_hist_status}'
 
     try:
         price_map = {
@@ -2842,7 +2936,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.1 B：進出場 / 停損停利研究 =====
+# ===== V3.6.2 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3048,7 +3142,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.1 40日風控第二階段 =====
+# ===== V3.6.2 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3198,7 +3292,113 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
         s=s.sort_values(['風控平衡分','PF','平均報酬%'],ascending=[False,False,False])
     return s,ddf
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.1｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.2 MAE/MFE + 停損甜蜜點 =====
+def _v362_excursion(df, entry_i, hold=40):
+    if df is None or entry_i>=len(df)-1:
+        return np.nan,np.nan,np.nan
+    entry=float(df['Close'].iloc[entry_i])
+    if entry<=0:return np.nan,np.nan,np.nan
+    end=min(entry_i+hold,len(df)-1)
+    highs=pd.to_numeric(df['High'].iloc[entry_i+1:end+1],errors='coerce')
+    lows=pd.to_numeric(df['Low'].iloc[entry_i+1:end+1],errors='coerce')
+    if highs.empty or lows.empty:return np.nan,np.nan,np.nan
+    return ((float(lows.min())/entry-1)*100,
+            (float(highs.max())/entry-1)*100,
+            (float(df['Close'].iloc[end])/entry-1)*100)
+
+def collect_v362_base_trades(result_df, score_threshold=85, cooldown=20, hold=40):
+    rows=[]
+    for _,rr in result_df.iterrows():
+        code=str(rr['股票']).zfill(4);nm=rr.get('名稱','');df=rr.get('_df')
+        if df is None or len(df)<270:continue
+        d=indicators(df.copy());last=-999999
+        for i in range(220,len(d)-hold-1):
+            if i-last<cooldown:continue
+            try:score=float(black_score(d.iloc[:i+1])[0])
+            except Exception:continue
+            if score<score_threshold:continue
+            mae,mfe,ret=_v362_excursion(d,i,hold)
+            if pd.isna(ret):continue
+            rows.append({'股票':code,'名稱':nm,'進場日':pd.Timestamp(d.index[i]).strftime('%Y-%m-%d'),
+                         '技術分數':score,'40日報酬%':ret,'MAE%':mae,'MFE%':mfe,
+                         '最後結果':'獲利' if ret>0 else '虧損'})
+            last=i
+    return pd.DataFrame(rows)
+
+def v362_mae_profile(base):
+    if base is None or base.empty:return pd.DataFrame()
+    rows=[]
+    for label,g in [('全部',base),('最後獲利',base[base['40日報酬%']>0]),('最後虧損',base[base['40日報酬%']<=0])]:
+        if g.empty:continue
+        mae=pd.to_numeric(g['MAE%'],errors='coerce').dropna()
+        mfe=pd.to_numeric(g['MFE%'],errors='coerce').dropna()
+        rows.append({'族群':label,'樣本數':len(g),'MAE中位數%':mae.median(),
+                     'MAE25分位%':mae.quantile(.25),'MAE10分位%':mae.quantile(.10),
+                     'MFE中位數%':mfe.median(),'MFE75分位%':mfe.quantile(.75),
+                     'MFE90分位%':mfe.quantile(.90),
+                     '40日平均報酬%':pd.to_numeric(g['40日報酬%'],errors='coerce').mean()})
+    return pd.DataFrame(rows)
+
+def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
+                        stops=(7,8,9,10,11,12,15), hold=40, min_sample=30):
+    rows=[];details=[]
+    configs=[('40日純時間',None)]+[(f'40日＋停損{s:g}%',float(s)) for s in stops]
+
+    for name,sl in configs:
+        rets=[];trades=[]
+        for _,rr in result_df.iterrows():
+            code=str(rr['股票']).zfill(4);nm=rr.get('名稱','');df=rr.get('_df')
+            if df is None or len(df)<270:continue
+            d=indicators(df.copy());last=-999999
+            for i in range(220,len(d)-hold-1):
+                if i-last<cooldown:continue
+                try:score=float(black_score(d.iloc[:i+1])[0])
+                except Exception:continue
+                if score<score_threshold:continue
+                entry=float(d['Close'].iloc[i]);end=i+hold
+                mae,mfe,base_ret=_v362_excursion(d,i,hold)
+                exit_price=float(d['Close'].iloc[end]);exit_i=end;reason='40日時間出場'
+                if sl is not None:
+                    stop_price=entry*(1-sl/100)
+                    for j in range(i+1,end+1):
+                        if float(d['Low'].iloc[j])<=stop_price:
+                            exit_price=stop_price;exit_i=j;reason=f'停損{sl:g}%';break
+                ret=(exit_price/entry-1)*100
+                rets.append(ret)
+                trades.append({'策略':name,'股票':code,'名稱':nm,'進場日':pd.Timestamp(d.index[i]).strftime('%Y-%m-%d'),
+                               '出場日':pd.Timestamp(d.index[exit_i]).strftime('%Y-%m-%d'),
+                               '技術分數':score,'MAE%':mae,'MFE%':mfe,'原40日報酬%':base_ret,
+                               '報酬%':ret,'出場原因':reason})
+                last=i
+
+        if len(rets)<min_sample:continue
+        m=_v360_trade_metrics(rets);td=pd.DataFrame(trades)
+        stop_rate=(td['出場原因'].astype(str).str.contains('停損').mean()*100) if not td.empty else np.nan
+        false_stop=np.nan
+        if sl is not None and not td.empty:
+            stopped=td[td['出場原因'].astype(str).str.contains('停損')].copy()
+            if not stopped.empty:
+                false_stop=(pd.to_numeric(stopped['原40日報酬%'],errors='coerce')>0).mean()*100
+        rows.append({'策略':name,'停損%':sl if sl is not None else np.nan,**m,
+                     '停損觸發率%':stop_rate,'被停損但40日後原可獲利比例%':false_stop})
+        details.extend(trades)
+
+    s=pd.DataFrame(rows);d=pd.DataFrame(details)
+    if not s.empty:
+        base=s[s['策略']=='40日純時間']
+        if not base.empty:
+            b=base.iloc[0]
+            s['勝率改善ppt']=s['勝率%']-b['勝率%']
+            s['平均報酬改善ppt']=s['平均報酬%']-b['平均報酬%']
+            s['PF改善']=s['PF']-b['PF']
+            s['最大虧損改善ppt']=s['最大單筆虧損%']-b['最大單筆虧損%']
+            s['報酬保留率%']=np.where(b['平均報酬%']!=0,s['平均報酬%']/b['平均報酬%']*100,np.nan)
+        s['停損平衡分']=s['平均報酬%'].fillna(-99)*1.5+s['PF'].fillna(0)*5+s['最大單筆虧損%'].fillna(-99)*0.35+s['勝率%'].fillna(0)*0.03
+        s=s.sort_values(['停損平衡分','平均報酬%','PF'],ascending=[False,False,False])
+    return s,d
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.2｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -3264,7 +3464,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.1｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.2｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -3381,16 +3581,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧭 3.6.1 風控第二階段'
+    '🧭 3.6.2 MAE/MFE停損研究'
 ])
 
-# V3.6.1：法人資料僅供閱讀，不改變排序分數。
+# V3.6.2：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.1｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.2｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -3414,6 +3614,7 @@ with t1:
         e3.metric('外資有效檔數', _diag.get('外資有效檔數',0))
         e4.metric('投信有效檔數', _diag.get('投信有效檔數',0))
 
+        st.caption(f"T86抓取狀態：{_diag.get('T86抓取狀態','—')}")
         if _diag.get('狀態') == 'OK':
             st.success('法人資料管線：OK')
         else:
@@ -3453,69 +3654,67 @@ with t5:
 
 
 
-with t6:
-    st.subheader('🧭 V3.6.1 進出場風控第二階段')
-    st.caption('基準固定40日，目標是降低尾端大虧損，同時盡量保留趨勢股的獲利空間。')
 
-    st.info(
-        '本輪不再廣泛掃描所有出場法，只集中驗證：'
-        '初始停損、MA跌破需連續2日確認、獲利後才啟動移動停利、獲利後保本。'
-    )
+with t6:
+    st.subheader('🧭 V3.6.2 MAE/MFE＋停損甜蜜點研究')
+    st.caption('基準固定40日。先看贏家通常會先跌多少，再測7%～15%停損。')
 
     c1,c2,c3=st.columns(3)
-    score_th=c1.slider('進場技術分數',70,95,85,5,key='v361_score')
-    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v361_cd')
-    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v361_min')
+    score_th=c1.slider('進場技術分數',70,95,85,5,key='v362_score')
+    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v362_cd')
+    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v362_min')
 
-    if st.button('▶ 執行 V3.6.1 風控第二階段',type='primary',key='run_v361'):
-        with st.spinner('執行40日風控第二階段回測...'):
-            s,d=run_v361_risk_lab(result,score_th,cooldown,min_sample)
-            st.session_state['v361_summary']=s
-            st.session_state['v361_detail']=d
+    stops=st.multiselect('測試停損%',[5,6,7,8,9,10,11,12,13,15,18,20],
+                         default=[7,8,9,10,11,12,15],key='v362_stops')
 
-    s=st.session_state.get('v361_summary',pd.DataFrame())
-    d=st.session_state.get('v361_detail',pd.DataFrame())
+    if st.button('▶ 執行 V3.6.2 MAE/MFE＋停損研究',type='primary',key='run_v362'):
+        with st.spinner('計算40日MAE/MFE並掃描停損甜蜜點...'):
+            base=collect_v362_base_trades(result,score_th,cooldown,40)
+            profile=v362_mae_profile(base)
+            sweep,detail=run_v362_stop_sweep(result,score_th,cooldown,tuple(stops),40,min_sample)
+            st.session_state['v362_base']=base
+            st.session_state['v362_profile']=profile
+            st.session_state['v362_sweep']=sweep
+            st.session_state['v362_detail']=detail
 
-    if s is not None and not s.empty:
-        st.markdown('### 🏆 40日風控策略排名')
-        cols=[
-            '策略','樣本數','勝率%','平均報酬%','中位數%','PF',
-            '最大單筆虧損%','勝率改善ppt','平均報酬改善ppt','PF改善',
-            '最大虧損改善ppt','停損觸發率%','保本觸發率%',
-            '移動停利觸發率%','MA確認出場率%','風控平衡分'
-        ]
-        cols=[c for c in cols if c in s.columns]
-        st.dataframe(s[cols],use_container_width=True,hide_index=True)
+    base=st.session_state.get('v362_base',pd.DataFrame())
+    profile=st.session_state.get('v362_profile',pd.DataFrame())
+    sweep=st.session_state.get('v362_sweep',pd.DataFrame())
+    detail=st.session_state.get('v362_detail',pd.DataFrame())
 
-        st.markdown('### 🎯 相對40日純時間出場')
-        base=s[s['策略']=='40日純時間']
-        if not base.empty:
-            b=base.iloc[0]
-            st.write(
-                f"基準：勝率 **{b['勝率%']:.2f}%**｜平均報酬 **{b['平均報酬%']:.2f}%**｜"
-                f"PF **{b['PF']:.2f}**｜最大單筆虧損 **{b['最大單筆虧損%']:.2f}%**"
-            )
+    if profile is not None and not profile.empty:
+        st.markdown('### 🧪 MAE / MFE 結構')
+        st.dataframe(profile,use_container_width=True,hide_index=True)
+        st.caption('若最後獲利族群的MAE常落在 -8%~-10%，8%停損就可能太緊；若多數贏家很少跌破 -8%，才適合更緊停損。')
 
-        st.markdown('### ✅ 這一輪判讀')
-        st.write(
-            '優先找：平均報酬下降有限，但最大單筆虧損明顯縮小，而且PF不惡化太多的策略。'
-            '如果「獲利後才啟動移動停利」能勝過固定停損，會更符合趨勢波段特性。'
-        )
-        st.warning(
-            '仍屬日K研究：同日內無法知道High/Low實際先後順序。'
-            '涉及停損/停利的判斷仍採保守估計，尚未含滑價、手續費與漲跌停成交限制。'
-        )
+    if sweep is not None and not sweep.empty:
+        st.markdown('### 🏆 40日停損甜蜜點排名')
+        cols=['策略','樣本數','勝率%','平均報酬%','中位數%','PF','最大單筆虧損%',
+              '停損觸發率%','被停損但40日後原可獲利比例%','報酬保留率%',
+              '勝率改善ppt','平均報酬改善ppt','PF改善','最大虧損改善ppt','停損平衡分']
+        cols=[c for c in cols if c in sweep.columns]
+        st.dataframe(sweep[cols],use_container_width=True,hide_index=True)
 
-        st.download_button(
-            '⬇️ 下載 V3.6.1 風控總表',
-            s.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.1_risk_summary.csv','text/csv',key='dl_v361_s'
-        )
-        if d is not None and not d.empty:
-            st.download_button(
-                '⬇️ 下載 V3.6.1 交易明細',
-                d.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.1_risk_detail.csv','text/csv',key='dl_v361_d'
-            )
+        st.markdown('### 📈 停損% → 報酬 / PF / 最大虧損')
+        curve=sweep[sweep['停損%'].notna()].sort_values('停損%')
+        if not curve.empty:
+            st.line_chart(curve.set_index('停損%')[['平均報酬%','PF','最大單筆虧損%']])
+
+        pure=sweep[sweep['策略']=='40日純時間']
+        if not pure.empty:
+            b=pure.iloc[0]
+            st.info(f"40日基準：平均報酬 {b['平均報酬%']:.2f}%｜PF {b['PF']:.2f}｜最大單筆虧損 {b['最大單筆虧損%']:.2f}%")
+
+        st.markdown('### ✅ 判讀標準')
+        st.write('優先找：最大虧損明顯縮小、平均報酬保留率高、PF不明顯惡化，而且「被停損但40日後原可獲利」比例不要太高。')
+        st.warning('仍是日K研究；固定停損採 Low 觸價即成交，尚未加入跳空穿價、滑價、手續費與漲跌停成交限制。')
+
+        st.download_button('⬇️ 下載 V3.6.2 停損總表',
+            sweep.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.2_stop_sweep_summary.csv','text/csv',key='dl_v362_s')
+        if base is not None and not base.empty:
+            st.download_button('⬇️ 下載 MAE/MFE 原始資料',
+                base.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.2_MAE_MFE_base.csv','text/csv',key='dl_v362_mae')
     else:
-        st.write('按「執行 V3.6.1 風控第二階段」開始。')
+        st.write('按「執行 V3.6.2 MAE/MFE＋停損研究」開始。')
