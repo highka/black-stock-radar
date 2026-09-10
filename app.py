@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.8
-# V3.6.8：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.8.1
+# V3.6.8.1：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -54,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.8 Fugle 即時行情層
+# ⚡ V3.6.8.1 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2327,7 +2327,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.8 外資因子證明版 =====
+# ===== V3.6.8.1 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2517,7 +2517,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.8 外資最佳權重驗證 =====
+# ===== V3.6.8.1 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2603,7 +2603,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.8 外資 Gate 驗證 =====
+# ===== V3.6.8.1 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2747,7 +2747,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.8 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.8.1 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -2942,7 +2942,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.8 B：進出場 / 停損停利研究 =====
+# ===== V3.6.8.1 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3148,7 +3148,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.8 40日風控第二階段 =====
+# ===== V3.6.8.1 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3299,7 +3299,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.8 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.8.1 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3405,7 +3405,7 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.8 停損確認機制驗證 =====
+# ===== V3.6.8.1 停損確認機制驗證 =====
 # 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
 # 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
 
@@ -3591,7 +3591,7 @@ def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.8 贏家路徑 + 時間停損 =====
+# ===== V3.6.8.1 贏家路徑 + 時間停損 =====
 def collect_v365_paths(result_df, score_threshold=85, cooldown=20, hold=40):
     checkpoints=[5,10,15,20,30,40]
     rows=[]
@@ -3737,7 +3737,7 @@ def v365_time_stop_lab(paths, hard_stop=12):
     return out
 
 
-# ===== V3.6.8 讓贏家奔跑：40日後延伸持有 =====
+# ===== V3.6.8.1 讓贏家奔跑：40日後延伸持有 =====
 def _v366_exit_trade(df, entry_i, hard_stop=12, base_hold=40,
                      extend_to=40, trend_rule='none', exit_rule='time'):
     """
@@ -3951,7 +3951,7 @@ def run_v366_winner_extension_lab(result_df, score_threshold=85, cooldown=20,
     return s, detail
 
 
-# ===== V3.6.8 超級贏家壓力測試 =====
+# ===== V3.6.8.1 超級贏家壓力測試 =====
 # 固定驗證目前候選：
 # 基準 = 40日 + 硬停損12%
 # 候選 = D40仍站MA15 -> 延伸到D80
@@ -4284,7 +4284,7 @@ def v367_final_verdict(top_stress, trade_conc, stock_conc, yearly, stockpool):
     return verdict, notes
 
 
-# ===== V3.6.8 全市場 Out-of-Sample 驗證 =====
+# ===== V3.6.8.1 全市場 Out-of-Sample 驗證 =====
 # 參數鎖死，不再最佳化：
 # 技術分數 >=85 / 盤中硬停損12% / D40站MA15 -> D80，否則D40出場。
 LOCKED_SCORE = 85
@@ -4573,7 +4573,287 @@ def _v368_auto_verdict(group_tests, topstress):
         verdict='🔴 Out-of-Sample 未通過'
     return verdict, notes
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.8｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.8.1 OOS 資料管線診斷＋樣本修正 =====
+# 不改策略，只修驗證引擎與樣本透明度。
+# 鎖死：85分 / -12% / D40站MA15 -> D80
+
+def _v3681_universe_symbols(result_df):
+    """
+    優先抓完整上市/上櫃/興櫃股票池。
+    若 load_market_universe 回傳市場欄位，全部保留；最後才 fallback 到 result。
+    """
+    syms=[]
+    try:
+        u = load_market_universe(universe_effective_key())
+        if isinstance(u, tuple):
+            u=u[0]
+        if isinstance(u,pd.DataFrame) and not u.empty:
+            for col in ['股票','代號','證券代號']:
+                if col in u.columns:
+                    syms=u[col].astype(str).str.strip().str.zfill(4).tolist()
+                    break
+    except Exception:
+        pass
+
+    if not syms and result_df is not None and not result_df.empty and '股票' in result_df.columns:
+        syms=result_df['股票'].astype(str).str.strip().str.zfill(4).tolist()
+
+    seen=set(); out=[]
+    for s in syms:
+        if s and s not in seen:
+            seen.add(s); out.append(s)
+    return out
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _v3681_download_symbol(symbol):
+    """
+    3年日K。上市.TW / 上櫃興櫃.TWO。
+    回傳 (df, status)
+    """
+    import yfinance as yf
+    attempts=[]
+    for suf in ['.TW','.TWO']:
+        ticker=str(symbol)+suf
+        try:
+            d=yf.download(
+                ticker,
+                period='3y',
+                interval='1d',
+                auto_adjust=False,
+                progress=False,
+                threads=False
+            )
+            if d is None or d.empty:
+                attempts.append(f'{ticker}:empty')
+                continue
+
+            if isinstance(d.columns,pd.MultiIndex):
+                d.columns=[c[0] if isinstance(c,tuple) else c for c in d.columns]
+
+            need=['Open','High','Low','Close','Volume']
+            if not all(c in d.columns for c in need):
+                attempts.append(f'{ticker}:missing_columns')
+                continue
+
+            d=d[need].dropna(subset=['Close']).copy()
+            d.index=pd.to_datetime(d.index).tz_localize(None)
+
+            if len(d)<320:
+                attempts.append(f'{ticker}:bars={len(d)}')
+                continue
+
+            return d, f'OK {ticker} bars={len(d)}'
+        except Exception as e:
+            attempts.append(f'{ticker}:{type(e).__name__}')
+
+    return pd.DataFrame(), ' / '.join(attempts[-2:])
+
+def _v3681_collect(symbols, cooldown=20):
+    """
+    逐檔建立漏斗統計：
+    股票池 -> K線成功 -> 指標成功 -> 曾有85分訊號 -> 有效交易
+    """
+    rows=[]
+    diag=[]
+    total=len(symbols)
+    prog=st.progress(0) if total else None
+
+    for idx,sym in enumerate(symbols):
+        status={
+            '股票':str(sym).zfill(4),
+            'K線成功':False,
+            '指標成功':False,
+            '曾達85分':False,
+            '有效交易':False,
+            '交易筆數':0,
+            '資料狀態':''
+        }
+
+        try:
+            df, dl_status=_v3681_download_symbol(sym)
+            status['資料狀態']=dl_status
+            if df is None or df.empty:
+                diag.append(status)
+                continue
+            status['K線成功']=True
+
+            try:
+                d=indicators(df.copy())
+            except Exception as e:
+                status['資料狀態'] += f' / indicators:{type(e).__name__}'
+                diag.append(status)
+                continue
+
+            if d is None or len(d)<320:
+                status['資料狀態'] += ' / indicators_empty'
+                diag.append(status)
+                continue
+            status['指標成功']=True
+
+            last=-999999
+            trade_count=0
+
+            for i in range(220, len(d)-LOCKED_D80-1):
+                if i-last < cooldown:
+                    continue
+
+                try:
+                    score=float(black_score(d.iloc[:i+1])[0])
+                except Exception:
+                    continue
+
+                if score < LOCKED_SCORE:
+                    continue
+
+                status['曾達85分']=True
+
+                b=_v368_locked_baseline_trade(d,i)
+                c=_v368_locked_trade(d,i)
+                if b and c:
+                    rows.append({
+                        '股票':str(sym).zfill(4),
+                        '進場日':pd.Timestamp(d.index[i]).strftime('%Y-%m-%d'),
+                        '技術分數':score,
+                        '基準報酬%':float(b['報酬%']),
+                        '候選報酬%':float(c['報酬%']),
+                        '候選延伸持有':bool(c.get('延伸持有',False)),
+                        '候選出場原因':c.get('出場原因',''),
+                        '基準持有天數':b.get('持有天數',np.nan),
+                        '候選持有天數':c.get('持有天數',np.nan)
+                    })
+                    trade_count += 1
+                    last=i
+
+            status['交易筆數']=trade_count
+            status['有效交易']=trade_count>0
+            diag.append(status)
+
+        finally:
+            if prog is not None:
+                prog.progress((idx+1)/max(total,1))
+
+    if prog is not None:
+        prog.empty()
+
+    return pd.DataFrame(rows), pd.DataFrame(diag)
+
+def _v3681_funnel(diag_df):
+    if diag_df is None or diag_df.empty:
+        return pd.DataFrame()
+
+    total=len(diag_df)
+    stages=[
+        ('股票池', total),
+        ('K線成功', int(diag_df['K線成功'].sum())),
+        ('指標成功', int(diag_df['指標成功'].sum())),
+        ('曾達85分', int(diag_df['曾達85分'].sum())),
+        ('有效交易股票', int(diag_df['有效交易'].sum())),
+        ('最終交易筆數', int(diag_df['交易筆數'].sum())),
+    ]
+
+    rows=[]
+    for stage,n in stages:
+        rows.append({
+            '階段':stage,
+            '數量':n,
+            '相對股票池比例%':(n/total*100) if total and stage!='最終交易筆數' else np.nan
+        })
+    return pd.DataFrame(rows)
+
+def _v3681_group_compare(all_trades, symbols, label, min_trades=30):
+    g=all_trades[all_trades['股票'].isin(set(symbols))].copy()
+    if g.empty:
+        return {
+            '驗證組':label,'股票數':len(symbols),'樣本數':0,'樣本判定':'不足',
+            '候選勝率%':np.nan,'基準勝率%':np.nan,'勝率改善ppt':np.nan,
+            '候選平均報酬%':np.nan,'基準平均報酬%':np.nan,'平均報酬改善ppt':np.nan,
+            '候選PF':np.nan,'基準PF':np.nan,'PF改善':np.nan
+        }
+
+    bp=_v368_perf_from_returns(g['基準報酬%'])
+    cp=_v368_perf_from_returns(g['候選報酬%'])
+    enough=len(g)>=min_trades
+
+    return {
+        '驗證組':label,
+        '股票數':len(symbols),
+        '樣本數':len(g),
+        '樣本判定':'足夠' if enough else '不足',
+        '候選勝率%':cp['勝率%'],
+        '基準勝率%':bp['勝率%'],
+        '勝率改善ppt':cp['勝率%']-bp['勝率%'],
+        '候選平均報酬%':cp['平均報酬%'],
+        '基準平均報酬%':bp['平均報酬%'],
+        '平均報酬改善ppt':cp['平均報酬%']-bp['平均報酬%'],
+        '候選PF':cp['PF'],
+        '基準PF':bp['PF'],
+        'PF改善':cp['PF']-bp['PF'] if pd.notna(cp['PF']) and pd.notna(bp['PF']) else np.nan
+    }
+
+def _v3681_build_groups(symbols, all_trades, min_trades=30):
+    rows=[]
+    for n in [50,100,200]:
+        if len(symbols)>=n:
+            rows.append(_v3681_group_compare(all_trades, symbols[:n], f'前{n}檔', min_trades))
+
+    if symbols:
+        rows.append(_v3681_group_compare(all_trades, symbols, '全部本次驗證', min_trades))
+
+    a,b=_v368_split_symbols(symbols)
+    if a:
+        rows.append(_v3681_group_compare(all_trades, a, 'OOS-A｜偶數序列', min_trades))
+    if b:
+        rows.append(_v3681_group_compare(all_trades, b, 'OOS-B｜奇數序列', min_trades))
+
+    return pd.DataFrame(rows)
+
+def _v3681_safe_verdict(groups, topstress, min_trades=30):
+    if groups is None or groups.empty:
+        return '⚪ 無法判定：沒有有效驗證組', []
+
+    valid=groups[groups['樣本數']>=min_trades].copy()
+    if valid.empty:
+        return f'⚪ 無法判定：所有驗證組樣本皆少於 {min_trades} 筆', [
+            '目前不把小樣本結果解讀成通過或失敗。',
+            '先檢查漏斗與K線下載成功率，再擴大驗證股票數。'
+        ]
+
+    score=0; notes=[]
+    pos_ret=(valid['平均報酬改善ppt']>0).mean()*100
+    pos_pf=(valid['PF改善']>=0).mean()*100
+
+    if pos_ret>=75:
+        score+=2; notes.append(f'✅ {pos_ret:.1f}% 足夠樣本驗證組平均報酬優於基準')
+    else:
+        notes.append(f'🟡 {pos_ret:.1f}% 足夠樣本驗證組平均報酬優於基準')
+
+    if pos_pf>=75:
+        score+=1; notes.append(f'✅ {pos_pf:.1f}% 足夠樣本驗證組PF不低於基準')
+    else:
+        notes.append(f'🟡 {pos_pf:.1f}% 足夠樣本驗證組PF不低於基準')
+
+    if topstress is not None and not topstress.empty:
+        x=topstress[topstress['移除候選最高報酬筆數']==5]
+        if not x.empty and int(x.iloc[0]['樣本數'])>=min_trades:
+            r=x.iloc[0]
+            if r['平均報酬改善ppt']>0:
+                score+=2; notes.append('✅ 移除Top5後平均報酬仍優於基準')
+            else:
+                notes.append('❌ 移除Top5後失去平均報酬優勢')
+            if pd.notna(r['PF改善']) and r['PF改善']>=0:
+                score+=1; notes.append('✅ 移除Top5後PF仍不低於基準')
+
+    if score>=5:
+        verdict='🟢 OOS通過'
+    elif score>=3:
+        verdict='🟡 OOS邊界通過'
+    else:
+        verdict='🔴 OOS未通過'
+
+    return verdict, notes
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.8.1｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -4639,7 +4919,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.8｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.8.1｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -4756,16 +5036,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧪 3.6.8 OOS驗證'
+    '🩺 3.6.8.1 OOS診斷'
 ])
 
-# V3.6.8：法人資料僅供閱讀，不改變排序分數。
+# V3.6.8.1：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.8｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.8.1｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -4818,7 +5098,7 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.8：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    # V3.6.8.1：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
     if PLOTLY_OK:
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -4910,117 +5190,111 @@ with t5:
 
 
 with t6:
-    st.subheader('🧪 V3.6.8 全市場 Out-of-Sample 驗證')
-    st.caption('參數全部鎖死：技術85分、盤中硬停損12%、D40站MA15才延伸到D80。這版不允許再調參，只做驗證。')
+    st.subheader('🩺 V3.6.8.1 OOS資料管線診斷＋有效樣本修正')
+    st.caption('策略完全不變：85分 / -12% / D40站MA15→D80。這版只修資料管線透明度與樣本判定。')
 
-    st.success(
-        '鎖定策略：85分進場 → -12%硬停損 → D40；'
-        '若D40仍站MA15則延伸到D80，否則D40出場。'
-    )
+    st.success('鎖死策略：85分進場 → 盤中-12%硬停損 → D40；D40仍站MA15才延伸到D80。')
 
-    universe=_v368_get_full_universe(result)
+    universe=_v3681_universe_symbols(result)
     total_u=len(universe)
 
     c1,c2,c3=st.columns(3)
-    c1.metric('可用完整股票池', total_u)
-    sample_cap=c2.selectbox(
-        '本次最多驗證股票數',
-        [50,100,200,300,500,1000,total_u] if total_u>0 else [0],
-        index=min(2, max(0, len([x for x in [50,100,200,300,500,1000,total_u] if x<=max(total_u,1)])-1)),
-        key='v368_cap'
-    )
-    cooldown=c3.slider('同股冷卻交易日（固定研究用）',20,30,20,10,key='v368_cd')
+    c1.metric('完整股票池可用數',total_u)
+    options=[x for x in [50,100,200,300,500,800,1000,total_u] if x>0 and x<=max(total_u,1)]
+    options=sorted(set(options))
+    if not options:
+        options=[0]
+    default_idx=options.index(200) if 200 in options else len(options)-1
+    sample_cap=c2.selectbox('本次驗證股票數',options,index=default_idx,key='v3681_cap')
+    min_trades=c3.selectbox('每組最低有效交易筆數',[20,30,40,50],index=1,key='v3681_mintrades')
 
-    st.caption('注意：策略參數不變；這裡只有「驗證多少股票」與冷卻20/30兩個已做過交叉驗證的設定。')
+    cooldown=st.radio('同股冷卻交易日',[20,30],horizontal=True,index=0,key='v3681_cd')
+    st.caption('這裡沒有任何策略參數可調。驗證股票數與最低樣本只影響「證據強度」，不改交易規則。')
 
-    if st.button('▶ 執行 V3.6.8 OOS驗證', type='primary', key='run_v368'):
-        with st.spinner('抓取完整股票池歷史資料並執行鎖死策略驗證，第一次會較久...'):
-            use_n=min(int(sample_cap), total_u) if total_u else 0
-            symbols=universe[:use_n]
-            a,b=_v368_split_symbols(symbols)
+    if st.button('▶ 執行 V3.6.8.1 OOS診斷',type='primary',key='run_v3681'):
+        with st.spinner('抓取歷史K線、建立漏斗、產生OOS交易樣本...'):
+            symbols=universe[:int(sample_cap)] if sample_cap else []
+            trades,diag=_v3681_collect(symbols,cooldown=cooldown)
+            funnel=_v3681_funnel(diag)
+            groups=_v3681_build_groups(symbols,trades,min_trades=min_trades)
+            topstress=_v368_top_remove_oos(trades) if trades is not None and not trades.empty else pd.DataFrame()
+            verdict,notes=_v3681_safe_verdict(groups,topstress,min_trades=min_trades)
 
-            all_trades=_v368_collect_for_symbols(symbols, max_symbols=None, cooldown=cooldown)
+            st.session_state['v3681_trades']=trades
+            st.session_state['v3681_diag']=diag
+            st.session_state['v3681_funnel']=funnel
+            st.session_state['v3681_groups']=groups
+            st.session_state['v3681_topstress']=topstress
+            st.session_state['v3681_verdict']=verdict
+            st.session_state['v3681_notes']=notes
 
-            groups={
-                'OOS-A｜偶數序列':a,
-                'OOS-B｜奇數序列':b,
-            }
-            if len(symbols)>=50:
-                groups['前50檔']=symbols[:50]
-            if len(symbols)>=100:
-                groups['前100檔']=symbols[:100]
-            if len(symbols)>=200:
-                groups['前200檔']=symbols[:200]
-            groups['全部本次驗證']=symbols
+    trades=st.session_state.get('v3681_trades',pd.DataFrame())
+    diag=st.session_state.get('v3681_diag',pd.DataFrame())
+    funnel=st.session_state.get('v3681_funnel',pd.DataFrame())
+    groups=st.session_state.get('v3681_groups',pd.DataFrame())
+    topstress=st.session_state.get('v3681_topstress',pd.DataFrame())
+    verdict=st.session_state.get('v3681_verdict','')
+    notes=st.session_state.get('v3681_notes',[])
 
-            group_tests=_v368_group_tests(all_trades, groups)
-            topstress=_v368_top_remove_oos(all_trades)
-            verdict,notes=_v368_auto_verdict(group_tests,topstress)
+    if funnel is not None and not funnel.empty:
+        st.markdown('### 🔎 ① OOS資料漏斗')
+        st.dataframe(funnel,use_container_width=True,hide_index=True)
 
-            st.session_state['v368_trades']=all_trades
-            st.session_state['v368_groups']=group_tests
-            st.session_state['v368_topstress']=topstress
-            st.session_state['v368_verdict']=verdict
-            st.session_state['v368_notes']=notes
+        if diag is not None and not diag.empty:
+            k_ok=int(diag['K線成功'].sum())
+            sig_ok=int(diag['曾達85分'].sum())
+            trade_ok=int(diag['有效交易'].sum())
+            d1,d2,d3,d4=st.columns(4)
+            d1.metric('送入股票',len(diag))
+            d2.metric('K線成功',k_ok)
+            d3.metric('曾達85分股票',sig_ok)
+            d4.metric('有效交易股票',trade_ok)
 
-    trades=st.session_state.get('v368_trades',pd.DataFrame())
-    group_tests=st.session_state.get('v368_groups',pd.DataFrame())
-    topstress=st.session_state.get('v368_topstress',pd.DataFrame())
-    verdict=st.session_state.get('v368_verdict','')
-    notes=st.session_state.get('v368_notes',[])
+            with st.expander('查看失敗股票與原因',expanded=False):
+                bad=diag[(diag['K線成功']==False)|(diag['指標成功']==False)|(diag['有效交易']==False)].copy()
+                st.dataframe(bad,use_container_width=True,hide_index=True)
 
-    if group_tests is not None and not group_tests.empty:
-        st.markdown('### 🧱 ① 開發外股票群／不同股票池驗證')
-        st.dataframe(group_tests,use_container_width=True,hide_index=True)
-        st.caption('最重要看 OOS-A / OOS-B 是否都維持平均報酬改善 >0，且PF不要明顯惡化。')
+    if groups is not None and not groups.empty:
+        st.markdown('### 🧱 ② 50 / 100 / 200 / 全部 ＋ OOS-A/B')
+        st.dataframe(groups,use_container_width=True,hide_index=True)
+        st.caption(f'樣本少於 {min_trades if "min_trades" in locals() else 30} 筆的驗證組只顯示結果，不納入通過/失敗判定。')
 
     if topstress is not None and not topstress.empty:
-        st.markdown('### 💥 ② OOS 移除超級贏家')
+        st.markdown('### 💥 ③ OOS移除超級贏家')
         st.dataframe(topstress,use_container_width=True,hide_index=True)
-        st.caption('若移除候選最高報酬Top5後，平均報酬仍優於基準，代表不是只靠少數怪物股。')
 
     if trades is not None and not trades.empty:
-        st.markdown('### 📊 ③ OOS 整體比較')
-        overall=_v368_compare(trades)
-        st.dataframe(overall,use_container_width=True,hide_index=True)
-
-        st.markdown('### 🏷️ ④ 延伸比例與出場原因')
-        ext_rate=trades['候選延伸持有'].mean()*100 if '候選延伸持有' in trades.columns else np.nan
-        e1,e2=st.columns(2)
-        e1.metric('D40站MA15而延伸比例',f'{ext_rate:.1f}%')
-        reason=trades['候選出場原因'].value_counts().rename_axis('出場原因').reset_index(name='筆數')
-        reason['比例%']=reason['筆數']/reason['筆數'].sum()*100
-        st.dataframe(reason,use_container_width=True,hide_index=True)
+        st.markdown('### 📊 ④ 整體鎖死策略比較')
+        st.dataframe(_v368_compare(trades),use_container_width=True,hide_index=True)
 
     if verdict:
-        st.markdown('### 🧾 V3.6.8 自動判定')
+        st.markdown('### 🧾 V3.6.8.1 自動判定')
         if verdict.startswith('🟢'):
             st.success(verdict)
         elif verdict.startswith('🟡'):
             st.warning(verdict)
-        else:
+        elif verdict.startswith('🔴'):
             st.error(verdict)
+        else:
+            st.info(verdict)
+
         for n in notes:
             st.write(n)
 
-        st.markdown('### ✅ 這一版只接受驗證，不接受調參')
-        st.write(
-            '若結果不好，不把85改成90、不把D80改成D60、不把12%改成10%。'
-            '先判定目前鎖死策略是否能泛化；只有通過後才進正式策略整合。'
-        )
+        st.warning('若漏斗顯示大量股票卡在「K線成功」之前，先修資料來源；若K線正常但85分訊號太少，這是策略本身的訊號稀疏，不應偷偷降門檻。')
 
+    if diag is not None and not diag.empty:
+        st.download_button(
+            '⬇️ 下載 OOS資料診斷明細',
+            diag.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.8.1_oos_pipeline_diagnostics.csv','text/csv',key='dl_v3681_diag'
+        )
     if trades is not None and not trades.empty:
         st.download_button(
-            '⬇️ 下載 V3.6.8 OOS交易明細',
+            '⬇️ 下載 OOS交易明細',
             trades.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.8_oos_trades.csv','text/csv',key='dl_v368_trades'
-        )
-    if group_tests is not None and not group_tests.empty:
-        st.download_button(
-            '⬇️ 下載 V3.6.8 OOS分組結果',
-            group_tests.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.8_oos_groups.csv','text/csv',key='dl_v368_groups'
+            'V3.6.8.1_oos_trades.csv','text/csv',key='dl_v3681_trades'
         )
 
     if not verdict:
-        st.write('按「執行 V3.6.8 OOS驗證」開始。第一次抓較多股票歷史資料時，執行時間會比前幾版長。')
+        st.write('建議第一次先跑200檔。若K線成功率正常，再擴到500檔以上。')
