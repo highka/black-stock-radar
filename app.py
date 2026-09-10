@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.5
-# V3.6.5：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.6
+# V3.6.6：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -54,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.5 Fugle 即時行情層
+# ⚡ V3.6.6 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -2327,7 +2327,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.5 外資因子證明版 =====
+# ===== V3.6.6 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2517,7 +2517,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.5 外資最佳權重驗證 =====
+# ===== V3.6.6 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2603,7 +2603,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.5 外資 Gate 驗證 =====
+# ===== V3.6.6 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2747,7 +2747,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.5 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.6 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -2942,7 +2942,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.5 B：進出場 / 停損停利研究 =====
+# ===== V3.6.6 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3148,7 +3148,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.5 40日風控第二階段 =====
+# ===== V3.6.6 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3299,7 +3299,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.5 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.6 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3405,7 +3405,7 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.5 停損確認機制驗證 =====
+# ===== V3.6.6 停損確認機制驗證 =====
 # 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
 # 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
 
@@ -3591,7 +3591,7 @@ def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.5 贏家路徑 + 時間停損 =====
+# ===== V3.6.6 贏家路徑 + 時間停損 =====
 def collect_v365_paths(result_df, score_threshold=85, cooldown=20, hold=40):
     checkpoints=[5,10,15,20,30,40]
     rows=[]
@@ -3736,7 +3736,221 @@ def v365_time_stop_lab(paths, hard_stop=12):
         out=out.sort_values(['時間停損分','平均報酬%'],ascending=[False,False])
     return out
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.5｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.6 讓贏家奔跑：40日後延伸持有 =====
+def _v366_exit_trade(df, entry_i, hard_stop=12, base_hold=40,
+                     extend_to=40, trend_rule='none', exit_rule='time'):
+    """
+    嚴格逐日模擬：
+    1) 訊號日收盤進場
+    2) 全程保留盤中 -12% 硬停損
+    3) 到第40交易日才判斷是否符合延伸條件（不偷看未來）
+    4) 未符合 -> D40收盤出場
+    5) 符合 -> 最多延伸到 D60/D80，期間依指定趨勢規則出場
+    """
+    if df is None or entry_i >= len(df)-1:
+        return None
+    entry = float(df['Close'].iloc[entry_i])
+    if not np.isfinite(entry) or entry <= 0:
+        return None
+
+    last_i = min(entry_i + int(extend_to), len(df)-1)
+    d40_i = min(entry_i + int(base_hold), len(df)-1)
+    stop_price = entry * (1-hard_stop/100)
+
+    exit_i = d40_i
+    exit_price = float(df['Close'].iloc[d40_i])
+    reason = f'D{base_hold}固定出場'
+    extended = False
+    d40_ret = (exit_price/entry-1)*100
+
+    # D1~D40 先執行硬停損
+    for j in range(entry_i+1, d40_i+1):
+        low = float(df['Low'].iloc[j])
+        if low <= stop_price:
+            return {
+                '進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+                '出場日':pd.Timestamp(df.index[j]).strftime('%Y-%m-%d'),
+                '進場價':entry,'出場價':stop_price,
+                '報酬%':-float(hard_stop),'D40報酬%':d40_ret,
+                '持有天數':j-entry_i,'出場原因':f'硬停損{hard_stop:g}%',
+                'D40符合延伸':False,'延伸持有':False
+            }
+
+    if int(extend_to) <= int(base_hold) or trend_rule == 'none':
+        return {
+            '進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+            '出場日':pd.Timestamp(df.index[d40_i]).strftime('%Y-%m-%d'),
+            '進場價':entry,'出場價':exit_price,'報酬%':d40_ret,'D40報酬%':d40_ret,
+            '持有天數':d40_i-entry_i,'出場原因':reason,
+            'D40符合延伸':False,'延伸持有':False
+        }
+
+    r40 = df.iloc[d40_i]
+    close40 = float(r40['Close'])
+    ma15 = pd.to_numeric(r40.get('MA15', np.nan), errors='coerce')
+    ma60 = pd.to_numeric(r40.get('MA60', np.nan), errors='coerce')
+    ma60_prev = pd.to_numeric(df['MA60'].iloc[max(entry_i, d40_i-5)], errors='coerce') if 'MA60' in df.columns else np.nan
+
+    if trend_rule == 'ma15':
+        trend_ok = pd.notna(ma15) and close40 > float(ma15)
+    elif trend_rule == 'ma15_ma60':
+        trend_ok = pd.notna(ma15) and pd.notna(ma60) and close40 > float(ma15) > float(ma60)
+    elif trend_rule == 'strong':
+        trend_ok = (
+            pd.notna(ma15) and pd.notna(ma60) and pd.notna(ma60_prev)
+            and close40 > float(ma15) > float(ma60)
+            and float(ma60) > float(ma60_prev)
+        )
+    else:
+        trend_ok = False
+
+    if not trend_ok:
+        return {
+            '進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+            '出場日':pd.Timestamp(df.index[d40_i]).strftime('%Y-%m-%d'),
+            '進場價':entry,'出場價':exit_price,'報酬%':d40_ret,'D40報酬%':d40_ret,
+            '持有天數':d40_i-entry_i,'出場原因':'D40趨勢不足',
+            'D40符合延伸':False,'延伸持有':False
+        }
+
+    extended = True
+    exit_i = last_i
+    exit_price = float(df['Close'].iloc[last_i])
+    reason = f'D{extend_to}時間出場'
+
+    below_count = 0
+    for j in range(d40_i+1, last_i+1):
+        low = float(df['Low'].iloc[j])
+        close = float(df['Close'].iloc[j])
+
+        if low <= stop_price:
+            exit_i, exit_price, reason = j, stop_price, f'硬停損{hard_stop:g}%'
+            break
+
+        if exit_rule == 'ma15':
+            ma = pd.to_numeric(df['MA15'].iloc[j], errors='coerce')
+            if pd.notna(ma) and close < float(ma):
+                exit_i, exit_price, reason = j, close, '延伸後跌破MA15'
+                break
+        elif exit_rule == 'ma60':
+            ma = pd.to_numeric(df['MA60'].iloc[j], errors='coerce')
+            if pd.notna(ma) and close < float(ma):
+                exit_i, exit_price, reason = j, close, '延伸後跌破MA60'
+                break
+        elif exit_rule == 'ma15_2d':
+            ma = pd.to_numeric(df['MA15'].iloc[j], errors='coerce')
+            if pd.notna(ma) and close < float(ma):
+                below_count += 1
+            else:
+                below_count = 0
+            if below_count >= 2:
+                exit_i, exit_price, reason = j, close, '延伸後連2日跌破MA15'
+                break
+
+    ret = (exit_price/entry-1)*100
+    return {
+        '進場日':pd.Timestamp(df.index[entry_i]).strftime('%Y-%m-%d'),
+        '出場日':pd.Timestamp(df.index[exit_i]).strftime('%Y-%m-%d'),
+        '進場價':entry,'出場價':exit_price,'報酬%':ret,'D40報酬%':d40_ret,
+        '持有天數':exit_i-entry_i,'出場原因':reason,
+        'D40符合延伸':True,'延伸持有':extended
+    }
+
+def run_v366_winner_extension_lab(result_df, score_threshold=85, cooldown=20,
+                                  hard_stop=12, min_sample=30):
+    configs = [
+        ('基準｜40日＋硬停損12%',40,'none','time'),
+        ('D60｜D40站MA15上',60,'ma15','time'),
+        ('D60｜D40 MA15>MA60',60,'ma15_ma60','time'),
+        ('D60｜強趨勢＋跌破MA15出',60,'strong','ma15'),
+        ('D60｜強趨勢＋MA15連2日出',60,'strong','ma15_2d'),
+        ('D80｜D40站MA15上',80,'ma15','time'),
+        ('D80｜D40 MA15>MA60',80,'ma15_ma60','time'),
+        ('D80｜強趨勢＋跌破MA15出',80,'strong','ma15'),
+        ('D80｜強趨勢＋MA15連2日出',80,'strong','ma15_2d'),
+        ('D80｜強趨勢＋跌破MA60出',80,'strong','ma60'),
+    ]
+
+    rows, details = [], []
+    max_need = 80
+
+    for cfg_name, extend_to, trend_rule, exit_rule in configs:
+        trades = []
+        for _, rr in result_df.iterrows():
+            code = str(rr['股票']).zfill(4)
+            name = rr.get('名稱','')
+            df = rr.get('_df')
+            if df is None or len(df) < 310:
+                continue
+            d = indicators(df.copy())
+            last_entry = -999999
+
+            for i in range(220, len(d)-max_need-1):
+                if i-last_entry < cooldown:
+                    continue
+                try:
+                    score = float(black_score(d.iloc[:i+1])[0])
+                except Exception:
+                    continue
+                if score < score_threshold:
+                    continue
+
+                tr = _v366_exit_trade(
+                    d, i, hard_stop=hard_stop, base_hold=40,
+                    extend_to=extend_to, trend_rule=trend_rule, exit_rule=exit_rule
+                )
+                if not tr:
+                    continue
+                trades.append({'策略':cfg_name,'股票':code,'名稱':name,'技術分數':score,**tr})
+                last_entry = i
+
+        td = pd.DataFrame(trades)
+        if len(td) < min_sample:
+            continue
+
+        m = _v360_trade_metrics(pd.to_numeric(td['報酬%'], errors='coerce'))
+        ext = td[td['延伸持有']==True]
+        ext_rate = len(ext)/len(td)*100 if len(td) else np.nan
+        ext_avg = pd.to_numeric(ext['報酬%'],errors='coerce').mean() if len(ext) else np.nan
+        ext_d40 = pd.to_numeric(ext['D40報酬%'],errors='coerce').mean() if len(ext) else np.nan
+        ext_gain = ext_avg-ext_d40 if len(ext) else np.nan
+        giveback = np.nan
+        if len(ext):
+            giveback = (pd.to_numeric(ext['報酬%'],errors='coerce') <
+                        pd.to_numeric(ext['D40報酬%'],errors='coerce')).mean()*100
+
+        rows.append({
+            '策略':cfg_name, **m,
+            '延伸比例%':ext_rate,
+            '延伸股D40平均報酬%':ext_d40,
+            '延伸股最終平均報酬%':ext_avg,
+            '延伸增加報酬ppt':ext_gain,
+            '延伸後低於D40報酬比例%':giveback,
+            '平均持有天數':pd.to_numeric(td['持有天數'],errors='coerce').mean()
+        })
+        details.extend(trades)
+
+    s = pd.DataFrame(rows)
+    detail = pd.DataFrame(details)
+    if not s.empty:
+        base = s[s['策略'].str.startswith('基準｜')]
+        if not base.empty:
+            b = base.iloc[0]
+            s['勝率改善ppt'] = s['勝率%'] - b['勝率%']
+            s['平均報酬改善ppt'] = s['平均報酬%'] - b['平均報酬%']
+            s['PF改善'] = s['PF'] - b['PF']
+            s['最大虧損改善ppt'] = s['最大單筆虧損%'] - b['最大單筆虧損%']
+        s['奔跑分'] = (
+            s['平均報酬改善ppt'].fillna(0)*2.0 +
+            s['PF改善'].fillna(0)*4.0 +
+            s['延伸增加報酬ppt'].fillna(0)*0.8 -
+            s['延伸後低於D40報酬比例%'].fillna(0)*0.05
+        )
+        s = s.sort_values(['奔跑分','平均報酬%','PF'],ascending=[False,False,False])
+    return s, detail
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.6｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -3802,7 +4016,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.5｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.6｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -3919,16 +4133,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🚀 3.6.5 贏家路徑'
+    '🏃 3.6.6 讓贏家奔跑'
 ])
 
-# V3.6.5：法人資料僅供閱讀，不改變排序分數。
+# V3.6.6：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.5｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.6｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -3981,7 +4195,7 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.5：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    # V3.6.6：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
     if PLOTLY_OK:
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -4073,75 +4287,76 @@ with t5:
 
 
 with t6:
-    st.subheader('🚀 V3.6.5 贏家路徑＋時間停損')
-    st.caption('暫定 -12% 為硬風控候選；這一版研究真正的大贏家通常多久發動，以及「不動的股票」是否值得提前淘汰。')
+    st.subheader('🏃 V3.6.6 讓贏家奔跑｜40日後延伸持有')
+    st.caption('V3.6.5 已證明 D10/D15/D20 時間停損沒有優勢；本版改驗證：D40仍維持強趨勢的股票，是否值得續抱到 D60 / D80。')
+
+    st.success('目前研究基準：黑嚕嚕訊號進場 → 盤中 -12% 硬停損 → 一般股票 D40 出場 → D40 強勢股才允許延伸。')
 
     c1,c2,c3=st.columns(3)
-    score_th=c1.slider('進場技術分數',70,95,85,5,key='v365_score')
-    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v365_cd')
-    hard_stop=c3.selectbox('暫定硬停損%',[10,12,15],index=1,key='v365_hardstop')
+    score_th=c1.slider('進場技術分數',70,95,85,5,key='v366_score')
+    cooldown=c2.slider('同股冷卻交易日',5,40,20,5,key='v366_cd')
+    min_sample=c3.slider('最低有效樣本數',20,200,30,10,key='v366_min')
 
-    if st.button('▶ 執行 V3.6.5 贏家路徑分析',type='primary',key='run_v365'):
-        with st.spinner('分析第5/10/15/20/30/40日路徑...'):
-            paths=collect_v365_paths(result,score_th,cooldown,40)
-            summary=v365_path_summary(paths)
-            time_lab=v365_time_stop_lab(paths,hard_stop)
-            st.session_state['v365_paths']=paths
-            st.session_state['v365_summary']=summary
-            st.session_state['v365_time_lab']=time_lab
+    if st.button('▶ 執行 V3.6.6 贏家延伸驗證',type='primary',key='run_v366'):
+        with st.spinner('逐日模擬 -12%硬停損、D40趨勢判斷與D60/D80延伸...'):
+            summary,detail=run_v366_winner_extension_lab(
+                result,score_threshold=score_th,cooldown=cooldown,
+                hard_stop=12,min_sample=min_sample
+            )
+            st.session_state['v366_summary']=summary
+            st.session_state['v366_detail']=detail
 
-    paths=st.session_state.get('v365_paths',pd.DataFrame())
-    summary=st.session_state.get('v365_summary',pd.DataFrame())
-    time_lab=st.session_state.get('v365_time_lab',pd.DataFrame())
+    summary=st.session_state.get('v366_summary',pd.DataFrame())
+    detail=st.session_state.get('v366_detail',pd.DataFrame())
 
     if summary is not None and not summary.empty:
-        st.markdown('### 🏁 贏家 / 輸家發動速度')
-        st.dataframe(summary,use_container_width=True,hide_index=True)
+        st.markdown('### 🏆 40日後延伸策略排名')
+        cols=[
+            '策略','樣本數','勝率%','平均報酬%','中位數%','PF','最大單筆虧損%',
+            '延伸比例%','延伸股D40平均報酬%','延伸股最終平均報酬%',
+            '延伸增加報酬ppt','延伸後低於D40報酬比例%','平均持有天數',
+            '勝率改善ppt','平均報酬改善ppt','PF改善','奔跑分'
+        ]
+        st.dataframe(summary[[c for c in cols if c in summary.columns]],
+                     use_container_width=True,hide_index=True)
 
-        st.markdown('### 📈 各族群平均報酬路徑')
-        pv=summary.pivot(index='交易日',columns='族群',values='平均報酬%')
-        st.line_chart(pv)
-
-        # 關鍵時間點摘要
-        st.markdown('### 🔍 第10 / 15 / 20日關鍵觀察')
-        key=summary[summary['交易日'].isin([10,15,20])].copy()
-        st.dataframe(
-            key[['族群','交易日','樣本數','平均報酬%','中位數報酬%',
-                 '正報酬比例%','平均MFE%','平均MAE%']],
-            use_container_width=True,hide_index=True
-        )
-
-    if time_lab is not None and not time_lab.empty:
-        st.markdown('### ⏳ 時間停損候選排名')
-        st.dataframe(time_lab,use_container_width=True,hide_index=True)
-
-        st.caption(
-            '例如「D15仍≤0%出場」代表進場15個交易日後仍沒有正報酬就離場；'
-            '目的是釋放資金，而不是單純提高勝率。'
-        )
-
-        st.markdown('### 🎯 V3.6.5 決策邏輯')
+        st.markdown('### 🔎 我們真正要看的四個數字')
         st.write(
-            '如果大贏家在D10～D15通常已明顯轉正，而虧損族群仍停留在0%以下，'
-            '時間停損就有統計依據。反之，如果很多大贏家到D15仍未發動，'
-            '就維持40日＋12%硬停損，不增加時間停損。'
+            '①「平均報酬改善ppt」要 > 0；'
+            '②「PF改善」最好 ≥ 0；'
+            '③「延伸增加報酬ppt」要明顯為正；'
+            '④「延伸後低於D40報酬比例」不能太高。'
+        )
+
+        best=summary.iloc[0]
+        st.info(
+            f"目前排名第一：{best['策略']}｜平均報酬 {best['平均報酬%']:.2f}%｜"
+            f"PF {best['PF']:.2f}｜相對基準平均報酬改善 {best.get('平均報酬改善ppt',np.nan):.2f} ppt｜"
+            f"延伸比例 {best['延伸比例%']:.1f}%"
+        )
+
+        st.markdown('### 🧪 出場原因分布')
+        if detail is not None and not detail.empty:
+            reason=(detail.groupby(['策略','出場原因']).size()
+                    .reset_index(name='筆數'))
+            reason['比例%']=reason.groupby('策略')['筆數'].transform(lambda x:x/x.sum()*100)
+            st.dataframe(reason,use_container_width=True,hide_index=True)
+
+            st.download_button(
+                '⬇️ 下載 V3.6.6 交易明細',
+                detail.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.6_winner_extension_detail.csv','text/csv',key='dl_v366_detail'
+            )
+
+        st.download_button(
+            '⬇️ 下載 V3.6.6 延伸策略總表',
+            summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.6_winner_extension_summary.csv','text/csv',key='dl_v366_summary'
         )
 
         st.warning(
-            '這版的 -12% 硬停損在時間停損比較中使用40日MAE做近似判斷；'
-            '因此先用來篩選方向。若時間停損有優勢，下一階段再改成逐日順序的精確成交模擬。'
+            '判斷原則：如果延伸策略只是讓少數超級飆股把平均值拉高，但PF下降、'
+            '或多數延伸交易最後吐回D40獲利，就不採用。只有跨樣本仍同時改善平均報酬與PF，才值得進正式策略。'
         )
-
-        st.download_button(
-            '⬇️ 下載 V3.6.5 時間停損結果',
-            time_lab.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.5_time_stop.csv','text/csv',key='dl_v365_time'
-        )
-        if paths is not None and not paths.empty:
-            st.download_button(
-                '⬇️ 下載 V3.6.5 贏家路徑原始資料',
-                paths.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.5_winner_paths.csv','text/csv',key='dl_v365_paths'
-            )
     else:
-        st.write('按「執行 V3.6.5 贏家路徑分析」開始。')
+        st.write('按「執行 V3.6.6 贏家延伸驗證」開始。')
