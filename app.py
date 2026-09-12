@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.10
-# V3.6.10：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.11
+# V3.6.11：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -54,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.10 Fugle 即時行情層
+# ⚡ V3.6.11 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -439,7 +439,7 @@ def fetch_json_api(url, timeout=20):
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_market_universe(refresh_key=None):
     """
-    V3.6.10 多來源股票池：
+    V3.6.11 多來源股票池：
     每個市場各自嘗試「公司基本資料 API」；若數量異常或失敗，
     再用「每日行情 API」建立交易中股票池。
     不再因為只有某一市場成功幾十檔，就誤認為是完整全市場。
@@ -2415,7 +2415,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.10 外資因子證明版 =====
+# ===== V3.6.11 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2605,7 +2605,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.10 外資最佳權重驗證 =====
+# ===== V3.6.11 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2691,7 +2691,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.10 外資 Gate 驗證 =====
+# ===== V3.6.11 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2835,7 +2835,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.10 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.11 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -3030,7 +3030,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.10 B：進出場 / 停損停利研究 =====
+# ===== V3.6.11 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3236,7 +3236,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.10 40日風控第二階段 =====
+# ===== V3.6.11 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3387,7 +3387,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.10 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.11 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3493,7 +3493,7 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.10 停損確認機制驗證 =====
+# ===== V3.6.11 停損確認機制驗證 =====
 # 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
 # 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
 
@@ -3679,7 +3679,7 @@ def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.10 贏家路徑 + 時間停損 =====
+# ===== V3.6.11 贏家路徑 + 時間停損 =====
 def collect_v365_paths(result_df, score_threshold=85, cooldown=20, hold=40):
     checkpoints=[5,10,15,20,30,40]
     rows=[]
@@ -3825,7 +3825,7 @@ def v365_time_stop_lab(paths, hard_stop=12):
     return out
 
 
-# ===== V3.6.10 讓贏家奔跑：40日後延伸持有 =====
+# ===== V3.6.11 讓贏家奔跑：40日後延伸持有 =====
 def _v366_exit_trade(df, entry_i, hard_stop=12, base_hold=40,
                      extend_to=40, trend_rule='none', exit_rule='time'):
     """
@@ -4039,7 +4039,7 @@ def run_v366_winner_extension_lab(result_df, score_threshold=85, cooldown=20,
     return s, detail
 
 
-# ===== V3.6.10 超級贏家壓力測試 =====
+# ===== V3.6.11 超級贏家壓力測試 =====
 # 固定驗證目前候選：
 # 基準 = 40日 + 硬停損12%
 # 候選 = D40仍站MA15 -> 延伸到D80
@@ -4372,7 +4372,7 @@ def v367_final_verdict(top_stress, trade_conc, stock_conc, yearly, stockpool):
     return verdict, notes
 
 
-# ===== V3.6.10 全市場 Out-of-Sample 驗證 =====
+# ===== V3.6.11 全市場 Out-of-Sample 驗證 =====
 # 參數鎖死，不再最佳化：
 # 技術分數 >=85 / 盤中硬停損12% / D40站MA15 -> D80，否則D40出場。
 LOCKED_SCORE = 85
@@ -4662,7 +4662,7 @@ def _v368_auto_verdict(group_tests, topstress):
     return verdict, notes
 
 
-# ===== V3.6.10 OOS 資料管線診斷＋樣本修正 =====
+# ===== V3.6.11 OOS 資料管線診斷＋樣本修正 =====
 # 不改策略，只修驗證引擎與樣本透明度。
 # 鎖死：85分 / -12% / D40站MA15 -> D80
 
@@ -4677,7 +4677,7 @@ def _v3681_universe_symbols(result_df):
         if isinstance(u, tuple):
             u=u[0]
         if isinstance(u,pd.DataFrame) and not u.empty:
-            # V3.6.10 FIX:
+            # V3.6.11 FIX:
             # load_market_universe() 的正式欄位其實是「股票代號」，
             # 舊版漏掉這個欄位，因此 syms 一直是空的，最後錯誤 fallback
             # 到畫面 result（當時只有 5 檔），造成 OOS 股票池只有 5 檔。
@@ -4958,7 +4958,7 @@ def _v3681_safe_verdict(groups, topstress, min_trades=30):
     return verdict, notes
 
 
-# ===== V3.6.10 市場 / 流動性分層診斷 =====
+# ===== V3.6.11 市場 / 流動性分層診斷 =====
 # 不再最佳化出場規則；固定用「40日＋12%硬停損」當基準，
 # 專門回答：85分訊號在哪些股票族群有效、哪些族群失效。
 
@@ -5231,7 +5231,7 @@ def _v369_key_findings(tables):
     return good[:8],bad[:8]
 
 
-# ===== V3.6.10 Gate PK + OOS + 獲利集中度 =====
+# ===== V3.6.11 Gate PK + OOS + 獲利集中度 =====
 V3610_GATES = {
     '基準｜85+': {'score_min':85,'score_max':None,'ma200':False,'turnover_min':None},
     'Gate A｜85+＋站上MA200': {'score_min':85,'score_max':None,'ma200':True,'turnover_min':None},
@@ -5390,7 +5390,209 @@ def _v3610_gate_summary(pk,oos,wf,stress,min_sample=30):
     out=pd.DataFrame(rows)
     return out.sort_values(['Gate候選','Gate證據分','OOS平均報酬改善ppt'],ascending=[False,False,False]) if not out.empty else out
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.10｜B模式：即時優先＋最新盤後價備援')
+
+# ===== V3.6.11 正式進場引擎：鎖定 Gate D =====
+# V3.6.10 結論：
+# Gate D（90~94 + 站上MA200）在樣本量、OOS改善、跨年度穩定與移除Top5%後
+# 的綜合證據排名第一，因此本版鎖死規則，不再調參。
+V3611_GATE_NAME='Gate D｜90~94＋站上MA200'
+V3611_SCORE_MIN=90.0
+V3611_SCORE_MAX=95.0
+
+def _v3611_event_mask(df):
+    score=pd.to_numeric(df['技術分數'],errors='coerce')
+    close=pd.to_numeric(df['進場價'],errors='coerce')
+    ma200=pd.to_numeric(df['MA200'],errors='coerce')
+    return ((score>=V3611_SCORE_MIN)&(score<V3611_SCORE_MAX)&(close>=ma200)).fillna(False)
+
+def _v3611_current_candidates(result_df):
+    """
+    正式盤中/盤後候選：
+    只用鎖定 Gate D，不再加入成交額、KD、量比等新門檻。
+    """
+    if result_df is None or result_df.empty:
+        return pd.DataFrame()
+    z=result_df.copy()
+    score_col='黑嚕嚕分數' if '黑嚕嚕分數' in z.columns else ('綜合分數' if '綜合分數' in z.columns else None)
+    if score_col is None or '價格' not in z.columns or 'MA200' not in z.columns:
+        return pd.DataFrame()
+
+    score=pd.to_numeric(z[score_col],errors='coerce')
+    price=pd.to_numeric(z['價格'],errors='coerce')
+    ma200=pd.to_numeric(z['MA200'],errors='coerce')
+    z=z[(score>=90)&(score<95)&(price>=ma200)].copy()
+    if z.empty:
+        return z
+
+    z['Gate']='D40｜90~94＋站上MA200'
+    z['距MA200%']=(pd.to_numeric(z['價格'],errors='coerce')/pd.to_numeric(z['MA200'],errors='coerce')-1)*100
+    if '成交量' in z.columns:
+        z['估算成交額']=pd.to_numeric(z['價格'],errors='coerce')*pd.to_numeric(z['成交量'],errors='coerce')
+    else:
+        z['估算成交額']=np.nan
+
+    # 排名只排序，不作額外淘汰：先分數，再成交額，再距MA200較近者
+    z['_score']=pd.to_numeric(z[score_col],errors='coerce')
+    z['_liq']=pd.to_numeric(z['估算成交額'],errors='coerce').fillna(0)
+    z['_dist']=pd.to_numeric(z['距MA200%'],errors='coerce').abs()
+    z=z.sort_values(['_score','_liq','_dist'],ascending=[False,False,True])
+
+    keep=['股票','名稱','市場','價格','漲跌%','K','D','MA15','MA60','MA200',
+          '距MA200%','量比','估算成交額',score_col,'訊號','價格來源','行情狀態','行情時間','技術資料日','Gate']
+    keep=[c for c in keep if c in z.columns]
+    return z[keep].reset_index(drop=True)
+
+def _v3611_metrics(g):
+    return _v3610_metrics(g['40日基準報酬%'])
+
+def _v3611_locked_validation(events,min_sample=50):
+    """
+    鎖死 Gate D 後的正式驗證：
+    1. 整體
+    2. 時間 OOS 70/30
+    3. 年度
+    4. 市場
+    5. 成交額
+    6. 股價
+    7. 移除Top5%大贏家
+    """
+    if events is None or events.empty:
+        return {}
+
+    base=events.copy()
+    gate=events[_v3611_event_mask(events)].copy()
+
+    overall=[]
+    for name,g in [('基準｜85+',base),(V3611_GATE_NAME,gate)]:
+        m=_v3611_metrics(g)
+        overall.append({'模型':name,**m,'可判讀':m['樣本數']>=min_sample})
+    overall=pd.DataFrame(overall)
+    b=overall.iloc[0]
+    overall['勝率改善ppt']=overall['勝率%']-b['勝率%']
+    overall['平均報酬改善ppt']=overall['平均報酬%']-b['平均報酬%']
+    overall['中位數改善ppt']=overall['中位數%']-b['中位數%']
+    overall['PF改善']=overall['PF']-b['PF']
+
+    # OOS：每檔依時間前70/後30
+    parts=[]
+    for _,g in events.groupby('股票'):
+        g=g.sort_values('進場日').copy()
+        if len(g)<4: continue
+        cut=max(1,int(np.floor(len(g)*0.7)))
+        g['樣本區段']='開發70%'
+        g.iloc[cut:,g.columns.get_loc('樣本區段')]='OOS30%'
+        parts.append(g)
+    zz=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+
+    oos_rows=[]
+    if not zz.empty:
+        for seg,sg in zz.groupby('樣本區段'):
+            for name,g in [('基準｜85+',sg),(V3611_GATE_NAME,sg[_v3611_event_mask(sg)])]:
+                m=_v3611_metrics(g)
+                oos_rows.append({'樣本區段':seg,'模型':name,**m,'可判讀':m['樣本數']>=min_sample})
+    oos=pd.DataFrame(oos_rows)
+    if not oos.empty:
+        bb=oos[oos['模型']=='基準｜85+'][['樣本區段','勝率%','平均報酬%','中位數%','PF']].rename(
+            columns={'勝率%':'基準勝率%','平均報酬%':'基準平均報酬%','中位數%':'基準中位數%','PF':'基準PF'})
+        oos=oos.merge(bb,on='樣本區段',how='left')
+        oos['勝率改善ppt']=oos['勝率%']-oos['基準勝率%']
+        oos['平均報酬改善ppt']=oos['平均報酬%']-oos['基準平均報酬%']
+        oos['中位數改善ppt']=oos['中位數%']-oos['基準中位數%']
+        oos['PF改善']=oos['PF']-oos['基準PF']
+
+    def stratify(col):
+        rows=[]
+        vals=[x for x in events[col].dropna().unique()]
+        for v in vals:
+            bg=events[events[col]==v]
+            gg=bg[_v3611_event_mask(bg)]
+            bm=_v3611_metrics(bg); gm=_v3611_metrics(gg)
+            rows.append({
+                col:v,'基準樣本':bm['樣本數'],'Gate樣本':gm['樣本數'],
+                'Gate勝率%':gm['勝率%'],'基準勝率%':bm['勝率%'],
+                '勝率改善ppt':gm['勝率%']-bm['勝率%'],
+                'Gate平均報酬%':gm['平均報酬%'],'基準平均報酬%':bm['平均報酬%'],
+                '平均報酬改善ppt':gm['平均報酬%']-bm['平均報酬%'],
+                'Gate中位數%':gm['中位數%'],'基準中位數%':bm['中位數%'],
+                '中位數改善ppt':gm['中位數%']-bm['中位數%'],
+                'GatePF':gm['PF'],'基準PF':bm['PF'],'PF改善':gm['PF']-bm['PF'],
+                '可判讀':gm['樣本數']>=min_sample
+            })
+        return pd.DataFrame(rows).sort_values(['可判讀','平均報酬改善ppt'],ascending=[False,False]) if rows else pd.DataFrame()
+
+    market=stratify('市場')
+    turnover=stratify('成交額區間')
+    price=stratify('股價區間')
+
+    # 年度
+    ey=events.copy()
+    ey['年度']=pd.to_datetime(ey['進場日']).dt.year
+    year=stratify.__name__  # placeholder to keep linter quiet
+    year_rows=[]
+    for y,bg in ey.groupby('年度'):
+        gg=bg[_v3611_event_mask(bg)]
+        bm=_v3611_metrics(bg); gm=_v3611_metrics(gg)
+        year_rows.append({
+            '年度':int(y),'基準樣本':bm['樣本數'],'Gate樣本':gm['樣本數'],
+            'Gate勝率%':gm['勝率%'],'基準勝率%':bm['勝率%'],'勝率改善ppt':gm['勝率%']-bm['勝率%'],
+            'Gate平均報酬%':gm['平均報酬%'],'基準平均報酬%':bm['平均報酬%'],
+            '平均報酬改善ppt':gm['平均報酬%']-bm['平均報酬%'],
+            'GatePF':gm['PF'],'基準PF':bm['PF'],'PF改善':gm['PF']-bm['PF'],
+            '可判讀':gm['樣本數']>=max(20,min_sample//2)
+        })
+    year=pd.DataFrame(year_rows)
+
+    # Top5%壓力
+    stress_rows=[]
+    for name,g in [('基準｜85+',base),(V3611_GATE_NAME,gate)]:
+        x=g.sort_values('40日基準報酬%',ascending=False).copy()
+        n=max(1,int(np.ceil(len(x)*0.05))) if len(x) else 0
+        x=x.iloc[n:].copy() if n else x
+        m=_v3611_metrics(x)
+        stress_rows.append({'模型':name,'移除Top5%筆數':n,**m})
+    stress=pd.DataFrame(stress_rows)
+    if len(stress)==2:
+        sb=stress.iloc[0]
+        stress['勝率改善ppt']=stress['勝率%']-sb['勝率%']
+        stress['平均報酬改善ppt']=stress['平均報酬%']-sb['平均報酬%']
+        stress['中位數改善ppt']=stress['中位數%']-sb['中位數%']
+        stress['PF改善']=stress['PF']-sb['PF']
+
+    # 正式判定
+    gate_overall=overall[overall['模型']==V3611_GATE_NAME].iloc[0]
+    gate_oos=oos[(oos['模型']==V3611_GATE_NAME)&(oos['樣本區段']=='OOS30%')].iloc[0] if not oos.empty else None
+    gate_stress=stress[stress['模型']==V3611_GATE_NAME].iloc[0] if not stress.empty else None
+    valid_year=year[year['可判讀']==True] if not year.empty else pd.DataFrame()
+    positive_year_ratio=(valid_year['平均報酬改善ppt']>0).mean()*100 if len(valid_year) else np.nan
+
+    rules=[]
+    def add_rule(name,ok,value):
+        rules.append({'驗證條件':name,'結果':value,'通過':bool(ok)})
+
+    add_rule('整體平均報酬優於85+基準',gate_overall['平均報酬改善ppt']>0,f"{gate_overall['平均報酬改善ppt']:.2f} ppt")
+    add_rule('整體PF不低於基準',gate_overall['PF改善']>=0,f"{gate_overall['PF改善']:.2f}")
+    if gate_oos is not None:
+        add_rule('OOS樣本數足夠',gate_oos['樣本數']>=min_sample,f"{int(gate_oos['樣本數'])} 筆")
+        add_rule('OOS平均報酬優於基準',gate_oos['平均報酬改善ppt']>0,f"{gate_oos['平均報酬改善ppt']:.2f} ppt")
+        add_rule('OOS PF不低於基準',gate_oos['PF改善']>=0,f"{gate_oos['PF改善']:.2f}")
+    add_rule('跨年度正改善比例≥60%',pd.notna(positive_year_ratio) and positive_year_ratio>=60,f"{positive_year_ratio:.1f}%")
+    if gate_stress is not None:
+        add_rule('移除Top5%後平均報酬仍優於基準',gate_stress['平均報酬改善ppt']>0,f"{gate_stress['平均報酬改善ppt']:.2f} ppt")
+        add_rule('移除Top5%後PF仍不低於基準',gate_stress['PF改善']>=0,f"{gate_stress['PF改善']:.2f}")
+
+    rules=pd.DataFrame(rules)
+    passed=int(rules['通過'].sum()) if not rules.empty else 0
+    total=len(rules)
+    verdict='🟢 正式通過' if total and passed==total else ('🟡 條件通過' if total and passed>=total-2 else '🔴 未通過')
+
+    return {
+        'overall':overall,'oos':oos,'year':year,'market':market,
+        'turnover':turnover,'price':price,'stress':stress,
+        'rules':rules,'verdict':verdict,'passed':passed,'total':total,
+        'events':events,'gate_events':gate
+    }
+
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.11｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -5456,7 +5658,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.10｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.11｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -5573,16 +5775,16 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧪 3.6.10 Gate驗證'
+    '🚦 3.6.11 正式進場'
 ])
 
-# V3.6.10：法人資料僅供閱讀，不改變排序分數。
+# V3.6.11：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.10｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.11｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -5635,7 +5837,7 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.10：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    # V3.6.11：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
     if PLOTLY_OK:
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -5727,76 +5929,93 @@ with t5:
 
 
 with t6:
-    st.subheader('🧪 V3.6.10 Gate PK＋OOS＋獲利集中度')
-    st.caption('V3.6.9 已定位候選族群；本版只做 Gate 驗證，不新增技術因子。')
+    st.subheader('🚦 V3.6.11 正式進場引擎｜Gate D 已鎖定')
+    st.caption('V3.6.10 證據排名第一：Gate D＝技術分數 90~94＋站上 MA200。本版不再最佳化門檻，只做正式驗證與產生當下候選。')
 
+    st.success('🔒 鎖定規則：90 ≤ 黑嚕嚕技術分數 < 95，且股價 ≥ MA200。40日持有＋12%硬停損沿用既有鎖定基準。')
+
+    current=_v3611_current_candidates(result)
+    st.markdown('### 🎯 ① 今日 Gate D 候選')
+    if current.empty:
+        st.info('目前掃描結果沒有符合 Gate D 的股票。這不是錯誤；正式引擎不會為了湊股票放寬條件。')
+    else:
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('Gate D候選',len(current))
+        if '市場' in current.columns:
+            c2.metric('上市',int((current['市場']=='上市').sum()))
+            c3.metric('上櫃',int((current['市場']=='上櫃').sum()))
+            c4.metric('興櫃',int((current['市場']=='興櫃').sum()))
+        st.dataframe(current,use_container_width=True,hide_index=True)
+        st.download_button(
+            '⬇️ 下載今日 Gate D 候選',
+            current.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.11_today_GateD_candidates.csv','text/csv',key='dl_v3611_today'
+        )
+
+    st.markdown('### 🧱 ② 全市場正式驗證')
     universe=_v3681_universe_symbols(result)
     total_u=len(universe)
     c1,c2,c3=st.columns(3)
     c1.metric('完整股票池',total_u)
-    options=[x for x in [500,800,1000,1500,2000,total_u] if 0<x<=max(total_u,1)]
-    options=sorted(set(options)) or [0]
-    sample_cap=c2.selectbox('本次驗證股票數',options,index=(options.index(1000) if 1000 in options else len(options)-1),key='v3610_cap')
-    min_sample=c3.selectbox('最低有效樣本',[30,50,80,100],index=1,key='v3610_min')
-    cooldown=st.radio('同股冷卻交易日',[20,30],horizontal=True,index=0,key='v3610_cd')
+    opts=[x for x in [1000,1500,2000,total_u] if 0<x<=max(total_u,1)]
+    opts=sorted(set(opts)) or [0]
+    default_idx=len(opts)-1  # 正式版預設全部
+    cap=c2.selectbox('正式驗證股票數',opts,index=default_idx,key='v3611_cap')
+    min_sample=c3.selectbox('最低有效樣本',[30,50,80,100],index=1,key='v3611_min')
+    cooldown=st.radio('同股冷卻交易日',[20,30],horizontal=True,index=0,key='v3611_cd')
 
-    st.info('固定PK：基準85+、MA200 Gate、MA200＋5千萬、MA200＋5億、90~94＋MA200、90~94＋MA200＋5億。')
+    if st.button('▶ 執行 V3.6.11 正式 Gate D 驗證',type='primary',key='run_v3611'):
+        with st.spinner('建立全市場事件 → OOS → 年度 → 市場/成交額/股價分層 → Top5%壓力測試...'):
+            events,diag=_v3610_prepare_events(result,cap,cooldown)
+            pack=_v3611_locked_validation(events,min_sample)
+            st.session_state['v3611_pack']=pack
+            st.session_state['v3611_diag']=diag
 
-    if st.button('▶ 執行 V3.6.10 Gate驗證',type='primary',key='run_v3610'):
-        with st.spinner('Gate PK → OOS30% → 年度Walk-forward → Top1/3/5%壓力測試...'):
-            events,diag=_v3610_prepare_events(result,sample_cap,cooldown)
-            pk=_v3610_gate_pk(events,min_sample)
-            oos=_v3610_time_oos(events,min_sample)
-            wf=_v3610_walk_forward(events,max(20,min_sample//2))
-            conc,stress=_v3610_profit_concentration(events,min_sample)
-            summary=_v3610_gate_summary(pk,oos,wf,stress,min_sample)
-            st.session_state['v3610_events']=events
-            st.session_state['v3610_pk']=pk
-            st.session_state['v3610_oos']=oos
-            st.session_state['v3610_wf']=wf
-            st.session_state['v3610_conc']=conc
-            st.session_state['v3610_stress']=stress
-            st.session_state['v3610_summary']=summary
+    pack=st.session_state.get('v3611_pack',{})
+    if pack:
+        overall=pack['overall']; oos=pack['oos']; year=pack['year']
+        market=pack['market']; turnover=pack['turnover']; price=pack['price']
+        stress=pack['stress']; rules=pack['rules']
 
-    pk=st.session_state.get('v3610_pk',pd.DataFrame())
-    oos=st.session_state.get('v3610_oos',pd.DataFrame())
-    wf=st.session_state.get('v3610_wf',pd.DataFrame())
-    conc=st.session_state.get('v3610_conc',pd.DataFrame())
-    stress=st.session_state.get('v3610_stress',pd.DataFrame())
-    summary=st.session_state.get('v3610_summary',pd.DataFrame())
+        st.markdown('### 📊 ③ 鎖定 Gate D vs 85+基準')
+        st.dataframe(overall,use_container_width=True,hide_index=True)
 
-    if not pk.empty:
-        st.markdown('### 🏆 ① Gate 整體PK')
-        st.dataframe(pk,use_container_width=True,hide_index=True)
-
-    if not oos.empty:
-        st.markdown('### 🧱 ② 時間切分 OOS｜開發70% vs OOS30%')
+        st.markdown('### 🧪 ④ OOS｜開發70% vs OOS30%')
         st.dataframe(oos,use_container_width=True,hide_index=True)
 
-    if not wf.empty:
-        st.markdown('### 📅 ③ 年度 Walk-forward')
-        st.dataframe(wf,use_container_width=True,hide_index=True)
+        st.markdown('### 📅 ⑤ 年度穩定度')
+        st.dataframe(year,use_container_width=True,hide_index=True)
 
-    if not conc.empty:
-        st.markdown('### 🎯 ④ 獲利集中度')
-        st.dataframe(conc,use_container_width=True,hide_index=True)
+        st.markdown('### 🏢 ⑥ 市場別壓力測試')
+        st.dataframe(market,use_container_width=True,hide_index=True)
 
-    if not stress.empty:
-        st.markdown('### 💥 ⑤ 移除 Top 1% / 3% / 5% 大贏家')
+        c1,c2=st.columns(2)
+        with c1:
+            st.markdown('### 💰 ⑦ 成交額分層')
+            st.dataframe(turnover,use_container_width=True,hide_index=True)
+        with c2:
+            st.markdown('### 💵 ⑧ 股價分層')
+            st.dataframe(price,use_container_width=True,hide_index=True)
+
+        st.markdown('### 💥 ⑨ 移除 Top5% 大贏家')
         st.dataframe(stress,use_container_width=True,hide_index=True)
 
-    if not summary.empty:
-        st.markdown('### 🧾 ⑥ Gate 最終證據排名')
-        st.dataframe(summary,use_container_width=True,hide_index=True)
-        best=summary.iloc[0]
-        if bool(best['Gate候選']):
-            st.success(f"目前最有資格進正式進場引擎：{best['模型']}｜證據分 {int(best['Gate證據分'])}")
+        st.markdown('### 🧾 ⑩ 正式啟用判定')
+        st.dataframe(rules,use_container_width=True,hide_index=True)
+        verdict=pack['verdict']
+        if verdict.startswith('🟢'):
+            st.success(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 可進入下一版資金/持倉引擎。")
+        elif verdict.startswith('🟡'):
+            st.warning(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。保留Gate D，但下一版先做資金曲線與持倉壓力測試。")
         else:
-            st.warning('目前沒有 Gate 同時通過整體、OOS、跨年度與Top5%壓力測試。')
+            st.error(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 暫不進正式交易。")
+
         st.download_button(
-            '⬇️ 下載 V3.6.10 Gate證據排名',
-            summary.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.10_gate_evidence.csv','text/csv',key='dl_v3610_summary'
+            '⬇️ 下載 V3.6.11 正式驗證規則',
+            rules.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.11_GateD_formal_validation.csv','text/csv',key='dl_v3611_rules'
         )
+
+        st.caption('本版刻意不加入成交額門檻：V3.6.10 雖然 Gate C/E 的平均報酬更高，但 Gate D 的 OOS證據、樣本量與壓力測試綜合排名第一，因此先鎖定 Gate D，避免再次資料探勘。')
     else:
-        st.write('建議先跑1000檔；若結果穩定，再跑完整股票池。')
+        st.info('正式版建議直接使用「全部股票池」執行一次；完成後由自動判定決定是否進下一版資金/持倉引擎。')
