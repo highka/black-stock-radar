@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
-# 🖤 黑嚕嚕－台股盤中雷達 V3.6.11
-# V3.6.11：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
+# 🖤 黑嚕嚕－台股盤中雷達 V3.6.12
+# V3.6.12：Fugle 5秒快照＋即時未完成日K注入＋Yahoo歷史日K＋官方行情備援＋A2.3.5可靠度驗證
 # ============================================================
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
@@ -54,7 +54,7 @@ def universe_effective_key(dt=None):
 
 
 # ============================================================
-# ⚡ V3.6.11 Fugle 即時行情層
+# ⚡ V3.6.12 Fugle 即時行情層
 # Fugle 官方文件：
 #   /snapshot/quotes/TSE / OTC / ESB 約每 5 秒更新
 # API Key 建議放在 Streamlit Secrets：
@@ -439,7 +439,7 @@ def fetch_json_api(url, timeout=20):
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_market_universe(refresh_key=None):
     """
-    V3.6.11 多來源股票池：
+    V3.6.12 多來源股票池：
     每個市場各自嘗試「公司基本資料 API」；若數量異常或失敗，
     再用「每日行情 API」建立交易中股票池。
     不再因為只有某一市場成功幾十檔，就誤認為是完整全市場。
@@ -2415,7 +2415,7 @@ def run_a242_diagnostic(event_base, thresholds=(75,80,85,90), horizons=(5,10,20,
     return comp,rank
 
 
-# ===== V3.6.11 外資因子證明版 =====
+# ===== V3.6.12 外資因子證明版 =====
 # 核心：驗證「外資5%」是否在不同門檻、持有期、連買天數、買超強度下仍穩定改善。
 # 不以單一最佳參數定版，優先看跨條件穩健度。
 
@@ -2605,7 +2605,7 @@ def run_v353_foreign_proof(event_base, thresholds=(75,80,85,90), horizons=(20,30
     return grid, model_summary, streak_df, intensity_df
 
 
-# ===== V3.6.11 外資最佳權重驗證 =====
+# ===== V3.6.12 外資最佳權重驗證 =====
 def run_v354_weight_curve(event_base, thresholds=(75,80,85,90), horizons=(20,30,40),
                           min_sample=40, weights=(0,2.5,5,7.5,10,12.5,15)):
     if event_base is None or event_base.empty:return pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
@@ -2691,7 +2691,7 @@ def add_v356_flip_features(event_base, chip_hist):
     return base.merge(keep, on=['股票','日期'], how='left')
 
 
-# ===== V3.6.11 外資 Gate 驗證 =====
+# ===== V3.6.12 外資 Gate 驗證 =====
 # 結論延伸：外資不直接加權，改測「是否應當作進場確認條件」。
 def _v355_gate_mask(z, gate_name):
     fs = pd.to_numeric(z['外資連買賣天數'], errors='coerce').fillna(0)
@@ -2835,7 +2835,7 @@ def run_v355_gate_validation(event_base, thresholds=(75,80,85,90),
 
 
 
-# ===== V3.6.11 正式版：法人只做資訊標籤，不參與技術100分 =====
+# ===== V3.6.12 正式版：法人只做資訊標籤，不參與技術100分 =====
 
 def v361_chip_diagnostics(result_df, chip_days=15):
     """
@@ -3030,7 +3030,7 @@ def v358_attach_chip_labels(df):
     return x
 
 
-# ===== V3.6.11 B：進出場 / 停損停利研究 =====
+# ===== V3.6.12 B：進出場 / 停損停利研究 =====
 def _v360_trade_metrics(rets):
     r = pd.Series(rets, dtype=float).dropna()
     if r.empty:
@@ -3236,7 +3236,7 @@ def run_v360_exit_lab(result_df, score_threshold=85, cooldown=20,
 
 
 
-# ===== V3.6.11 40日風控第二階段 =====
+# ===== V3.6.12 40日風控第二階段 =====
 def _v361_entry_exit_one(df, entry_i, max_hold=40,
                          initial_stop=None,
                          ma_confirm=None,
@@ -3387,7 +3387,7 @@ def run_v361_risk_lab(result_df, score_threshold=85, cooldown=20, min_sample=30)
     return s,ddf
 
 
-# ===== V3.6.11 MAE/MFE + 停損甜蜜點 =====
+# ===== V3.6.12 MAE/MFE + 停損甜蜜點 =====
 def _v362_excursion(df, entry_i, hold=40):
     if df is None or entry_i>=len(df)-1:
         return np.nan,np.nan,np.nan
@@ -3493,7 +3493,7 @@ def run_v362_stop_sweep(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.11 停損確認機制驗證 =====
+# ===== V3.6.12 停損確認機制驗證 =====
 # 目的：比較「盤中觸價停損」與「收盤確認 / 連續2日確認」，
 # 看能不能降低誤殺趨勢股，同時保留尾端風險控制。
 
@@ -3679,7 +3679,7 @@ def run_v364_stop_confirmation_lab(result_df, score_threshold=85, cooldown=20,
     return s,d
 
 
-# ===== V3.6.11 贏家路徑 + 時間停損 =====
+# ===== V3.6.12 贏家路徑 + 時間停損 =====
 def collect_v365_paths(result_df, score_threshold=85, cooldown=20, hold=40):
     checkpoints=[5,10,15,20,30,40]
     rows=[]
@@ -3825,7 +3825,7 @@ def v365_time_stop_lab(paths, hard_stop=12):
     return out
 
 
-# ===== V3.6.11 讓贏家奔跑：40日後延伸持有 =====
+# ===== V3.6.12 讓贏家奔跑：40日後延伸持有 =====
 def _v366_exit_trade(df, entry_i, hard_stop=12, base_hold=40,
                      extend_to=40, trend_rule='none', exit_rule='time'):
     """
@@ -4039,7 +4039,7 @@ def run_v366_winner_extension_lab(result_df, score_threshold=85, cooldown=20,
     return s, detail
 
 
-# ===== V3.6.11 超級贏家壓力測試 =====
+# ===== V3.6.12 超級贏家壓力測試 =====
 # 固定驗證目前候選：
 # 基準 = 40日 + 硬停損12%
 # 候選 = D40仍站MA15 -> 延伸到D80
@@ -4372,7 +4372,7 @@ def v367_final_verdict(top_stress, trade_conc, stock_conc, yearly, stockpool):
     return verdict, notes
 
 
-# ===== V3.6.11 全市場 Out-of-Sample 驗證 =====
+# ===== V3.6.12 全市場 Out-of-Sample 驗證 =====
 # 參數鎖死，不再最佳化：
 # 技術分數 >=85 / 盤中硬停損12% / D40站MA15 -> D80，否則D40出場。
 LOCKED_SCORE = 85
@@ -4662,7 +4662,7 @@ def _v368_auto_verdict(group_tests, topstress):
     return verdict, notes
 
 
-# ===== V3.6.11 OOS 資料管線診斷＋樣本修正 =====
+# ===== V3.6.12 OOS 資料管線診斷＋樣本修正 =====
 # 不改策略，只修驗證引擎與樣本透明度。
 # 鎖死：85分 / -12% / D40站MA15 -> D80
 
@@ -4677,7 +4677,7 @@ def _v3681_universe_symbols(result_df):
         if isinstance(u, tuple):
             u=u[0]
         if isinstance(u,pd.DataFrame) and not u.empty:
-            # V3.6.11 FIX:
+            # V3.6.12 FIX:
             # load_market_universe() 的正式欄位其實是「股票代號」，
             # 舊版漏掉這個欄位，因此 syms 一直是空的，最後錯誤 fallback
             # 到畫面 result（當時只有 5 檔），造成 OOS 股票池只有 5 檔。
@@ -4958,7 +4958,7 @@ def _v3681_safe_verdict(groups, topstress, min_trades=30):
     return verdict, notes
 
 
-# ===== V3.6.11 市場 / 流動性分層診斷 =====
+# ===== V3.6.12 市場 / 流動性分層診斷 =====
 # 不再最佳化出場規則；固定用「40日＋12%硬停損」當基準，
 # 專門回答：85分訊號在哪些股票族群有效、哪些族群失效。
 
@@ -5231,7 +5231,7 @@ def _v369_key_findings(tables):
     return good[:8],bad[:8]
 
 
-# ===== V3.6.11 Gate PK + OOS + 獲利集中度 =====
+# ===== V3.6.12 Gate PK + OOS + 獲利集中度 =====
 V3610_GATES = {
     '基準｜85+': {'score_min':85,'score_max':None,'ma200':False,'turnover_min':None},
     'Gate A｜85+＋站上MA200': {'score_min':85,'score_max':None,'ma200':True,'turnover_min':None},
@@ -5391,7 +5391,160 @@ def _v3610_gate_summary(pk,oos,wf,stress,min_sample=30):
     return out.sort_values(['Gate候選','Gate證據分','OOS平均報酬改善ppt'],ascending=[False,False,False]) if not out.empty else out
 
 
-# ===== V3.6.11 正式進場引擎：鎖定 Gate D =====
+# ===== V3.6.12 正式進場引擎：鎖定 Gate D =====
+
+# ===== V3.6.12 Gate D 真實資金 / 持倉壓力測試 =====
+# 原則：不再調 Gate D 進場條件，只測試「同時持股數、資金配置、成本、重疊交易」。
+def _v3612_daily_close_map(events):
+    out={}
+    if events is None or events.empty: return out
+    for sym,g in events.groupby('股票'):
+        gg=g.sort_values('進場日')
+        # 事件表本身不一定保存完整逐日價格，因此本版以每筆交易的進/出場報酬
+        # 建立「實現損益資金曲線」，不假裝成每日 mark-to-market。
+        out[str(sym)]=gg
+    return out
+
+def _v3612_prepare_trades(events):
+    if events is None or events.empty:
+        return pd.DataFrame()
+    z=events[_v3611_event_mask(events)].copy()
+    if z.empty: return z
+    z['進場日']=pd.to_datetime(z['進場日'])
+    # 40日策略的實際報酬欄已含既有停損邏輯；若有實際出場日/持有天數則優先使用。
+    ret_col='40日基準報酬%'
+    z['策略報酬%']=pd.to_numeric(z[ret_col],errors='coerce')
+    z=z.dropna(subset=['策略報酬%','進場日']).copy()
+    if '實際持有天數' in z.columns:
+        hold=pd.to_numeric(z['實際持有天數'],errors='coerce').fillna(40).clip(lower=1)
+    elif '平均持有天數' in z.columns:
+        hold=pd.to_numeric(z['平均持有天數'],errors='coerce').fillna(40).clip(lower=1)
+    else:
+        hold=pd.Series(40,index=z.index,dtype=float)
+    z['持有天數']=hold.astype(int)
+    if '出場日' in z.columns:
+        z['資金出場日']=pd.to_datetime(z['出場日'],errors='coerce')
+    else:
+        z['資金出場日']=pd.NaT
+    miss=z['資金出場日'].isna()
+    z.loc[miss,'資金出場日']=z.loc[miss,'進場日']+pd.to_timedelta(z.loc[miss,'持有天數'],unit='D')
+    return z.sort_values(['進場日','技術分數'],ascending=[True,False]).reset_index(drop=True)
+
+def _v3612_simulate(trades, initial_capital=1_000_000, max_positions=10,
+                    position_pct=10.0, fee_pct=0.1425, tax_pct=0.30,
+                    slippage_pct=0.10):
+    """
+    事件驅動資金模擬：
+    - 同時最多 max_positions
+    - 每筆投入目前權益的 position_pct%
+    - 同股持有中不重複進場
+    - 同日訊號以技術分數高者優先
+    - 買賣手續費、賣出交易稅、雙邊滑價納入
+    - 權益曲線為「實現損益曲線」；最大回撤不冒充逐日MTM回撤
+    """
+    if trades is None or trades.empty:
+        return pd.DataFrame(),pd.DataFrame(),{}
+
+    x=trades.copy().sort_values(['進場日','技術分數'],ascending=[True,False])
+    cash=float(initial_capital)
+    realized_equity=float(initial_capital)
+    open_pos=[]
+    logs=[]
+    curve=[{'日期':x['進場日'].min(),'實現權益':realized_equity,'現金':cash,'持倉數':0}]
+    buy_cost=fee_pct/100 + slippage_pct/100
+    sell_cost=fee_pct/100 + tax_pct/100 + slippage_pct/100
+
+    dates=sorted(set(x['進場日']).union(set(x['資金出場日'])))
+    for dt in dates:
+        # 先出場，釋放資金
+        closing=[p for p in open_pos if p['exit_date']<=dt]
+        for p in closing:
+            gross=p['alloc']*(1+p['gross_ret']/100)
+            proceeds=max(0.0,gross*(1-sell_cost))
+            cash+=proceeds
+            net_pnl=proceeds-p['alloc']*(1+buy_cost)
+            realized_equity+=net_pnl
+            logs.append({
+                '股票':p['股票'],'名稱':p.get('名稱',''),'進場日':p['entry_date'],
+                '出場日':p['exit_date'],'技術分數':p['score'],
+                '投入資金':p['alloc'],'毛報酬%':p['gross_ret'],
+                '淨損益':net_pnl,'淨報酬%':net_pnl/(p['alloc']*(1+buy_cost))*100 if p['alloc'] else 0,
+                '持有天數':p['hold']
+            })
+            open_pos.remove(p)
+
+        todays=x[x['進場日']==dt]
+        held={p['股票'] for p in open_pos}
+        for _,r in todays.iterrows():
+            if len(open_pos)>=max_positions: break
+            sym=str(r['股票'])
+            if sym in held: continue
+            # 以「目前實現權益」決定目標部位，並受現金限制
+            target=max(0.0,realized_equity*(position_pct/100))
+            alloc=min(target, cash/(1+buy_cost))
+            if alloc<=0: break
+            cash-=alloc*(1+buy_cost)
+            open_pos.append({
+                '股票':sym,'名稱':r.get('名稱',''),'entry_date':dt,
+                'exit_date':r['資金出場日'],'score':float(r['技術分數']),
+                'alloc':alloc,'gross_ret':float(r['策略報酬%']),
+                'hold':int(r['持有天數'])
+            })
+            held.add(sym)
+
+        curve.append({'日期':dt,'實現權益':realized_equity,'現金':cash,'持倉數':len(open_pos)})
+
+    # 最後把剩餘持倉按其策略報酬實現，避免資金曲線遺漏
+    for p in list(open_pos):
+        gross=p['alloc']*(1+p['gross_ret']/100)
+        proceeds=max(0.0,gross*(1-sell_cost))
+        cash+=proceeds
+        net_pnl=proceeds-p['alloc']*(1+buy_cost)
+        realized_equity+=net_pnl
+        logs.append({
+            '股票':p['股票'],'名稱':p.get('名稱',''),'進場日':p['entry_date'],
+            '出場日':p['exit_date'],'技術分數':p['score'],
+            '投入資金':p['alloc'],'毛報酬%':p['gross_ret'],
+            '淨損益':net_pnl,'淨報酬%':net_pnl/(p['alloc']*(1+buy_cost))*100 if p['alloc'] else 0,
+            '持有天數':p['hold']
+        })
+    if dates:
+        curve.append({'日期':max(dates),'實現權益':realized_equity,'現金':cash,'持倉數':0})
+
+    eq=pd.DataFrame(curve).sort_values('日期').drop_duplicates('日期',keep='last')
+    lg=pd.DataFrame(logs)
+    if not eq.empty:
+        peak=eq['實現權益'].cummax()
+        dd=(eq['實現權益']/peak-1)*100
+        max_dd=float(dd.min())
+    else: max_dd=np.nan
+    total_ret=(realized_equity/initial_capital-1)*100
+    wins=(lg['淨損益']>0).mean()*100 if len(lg) else np.nan
+    gp=lg.loc[lg['淨損益']>0,'淨損益'].sum() if len(lg) else 0
+    gl=-lg.loc[lg['淨損益']<0,'淨損益'].sum() if len(lg) else 0
+    pf=gp/gl if gl>0 else (np.inf if gp>0 else 0)
+    stats={
+        '初始資金':initial_capital,'期末實現權益':realized_equity,'總報酬%':total_ret,
+        '實現權益最大回撤%':max_dd,'完成交易':len(lg),'淨勝率%':wins,'淨PF':pf,
+        '最大同時持股':max_positions,'單筆目標資金%':position_pct
+    }
+    return eq,lg,stats
+
+def _v3612_scenario_grid(trades, initial_capital, fee_pct, tax_pct, slippage_pct):
+    rows=[]
+    for pos in [5,10,15,20]:
+        for pct in [5,10,15,20]:
+            # 避免理論配置超過100%
+            if pos*pct>120: continue
+            eq,lg,s=_v3612_simulate(trades,initial_capital,pos,pct,fee_pct,tax_pct,slippage_pct)
+            rows.append(s)
+    df=pd.DataFrame(rows)
+    if not df.empty:
+        # 風險效率：報酬 / |回撤|，僅作排序輔助
+        df['報酬回撤比']=df['總報酬%']/df['實現權益最大回撤%'].abs().replace(0,np.nan)
+        df=df.sort_values(['報酬回撤比','總報酬%'],ascending=[False,False]).reset_index(drop=True)
+    return df
+
 # V3.6.10 結論：
 # Gate D（90~94 + 站上MA200）在樣本量、OOS改善、跨年度穩定與移除Top5%後
 # 的綜合證據排名第一，因此本版鎖死規則，不再調參。
@@ -5592,7 +5745,7 @@ def _v3611_locked_validation(events,min_sample=50):
         'events':events,'gate_events':gate
     }
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.11｜B模式：即時優先＋最新盤後價備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.12｜B模式：即時優先＋最新盤後價備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -5658,7 +5811,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.11｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -5778,13 +5931,13 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '🚦 3.6.11 正式進場'
 ])
 
-# V3.6.11：法人資料僅供閱讀，不改變排序分數。
+# V3.6.12：法人資料僅供閱讀，不改變排序分數。
 result, _v360_chip_df, _v360_chip_date = v360_merge_chip_data(result, chip_days=15)
 result = v358_attach_chip_labels(result)
 
 
 with t1:
-    st.caption('V3.6.11｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
+    st.caption('V3.6.12｜法人資料修正＋進出場風控研究。黑嚕嚕技術100分維持原模型；外資/投信僅作資訊標籤。')
     if isinstance(_v360_chip_date, str) and _v360_chip_date not in ('TWSE T86 無有效資料','日期未知'):
         _today_tw = taiwan_now().strftime('%Y-%m-%d')
         if _v360_chip_date == _today_tw:
@@ -5837,7 +5990,7 @@ with t4:
     st.subheader('📈 個股分析');s=st.selectbox('選擇分析股票',result['股票'].tolist(),key='chart_stock');r=result[result['股票']==s].iloc[0];d=r['_df'].tail(120).copy();st.markdown(f"### {r['股票']} {r['名稱']}　{r['價格']:.2f}　{r['漲跌%']:+.2f}%")
     _chart_date=pd.Timestamp(d.index[-1]).strftime('%Y-%m-%d') if not d.empty else '—'
     st.caption(f"📅 圖表最新K棒：{_chart_date}｜{r.get('技術狀態','—')}｜價格來源：{r.get('價格來源','—')}")
-    # V3.6.11：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
+    # V3.6.12：標準K棒；若 Streamlit 尚未安裝 plotly，避免整個 App crash
     if PLOTLY_OK:
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -5929,7 +6082,7 @@ with t5:
 
 
 with t6:
-    st.subheader('🚦 V3.6.11 正式進場引擎｜Gate D 已鎖定')
+    st.subheader('🚦 V3.6.12 正式進場引擎｜Gate D 已鎖定')
     st.caption('V3.6.10 證據排名第一：Gate D＝技術分數 90~94＋站上 MA200。本版不再最佳化門檻，只做正式驗證與產生當下候選。')
 
     st.success('🔒 鎖定規則：90 ≤ 黑嚕嚕技術分數 < 95，且股價 ≥ MA200。40日持有＋12%硬停損沿用既有鎖定基準。')
@@ -5949,7 +6102,7 @@ with t6:
         st.download_button(
             '⬇️ 下載今日 Gate D 候選',
             current.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.11_today_GateD_candidates.csv','text/csv',key='dl_v3611_today'
+            'V3.6.12_today_GateD_candidates.csv','text/csv',key='dl_v3611_today'
         )
 
     st.markdown('### 🧱 ② 全市場正式驗證')
@@ -5964,7 +6117,7 @@ with t6:
     min_sample=c3.selectbox('最低有效樣本',[30,50,80,100],index=1,key='v3611_min')
     cooldown=st.radio('同股冷卻交易日',[20,30],horizontal=True,index=0,key='v3611_cd')
 
-    if st.button('▶ 執行 V3.6.11 正式 Gate D 驗證',type='primary',key='run_v3611'):
+    if st.button('▶ 執行 V3.6.12 正式 Gate D 驗證',type='primary',key='run_v3611'):
         with st.spinner('建立全市場事件 → OOS → 年度 → 市場/成交額/股價分層 → Top5%壓力測試...'):
             events,diag=_v3610_prepare_events(result,cap,cooldown)
             pack=_v3611_locked_validation(events,min_sample)
@@ -6011,11 +6164,70 @@ with t6:
             st.error(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 暫不進正式交易。")
 
         st.download_button(
-            '⬇️ 下載 V3.6.11 正式驗證規則',
+            '⬇️ 下載 V3.6.12 正式驗證規則',
             rules.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.11_GateD_formal_validation.csv','text/csv',key='dl_v3611_rules'
+            'V3.6.12_GateD_formal_validation.csv','text/csv',key='dl_v3611_rules'
         )
 
         st.caption('本版刻意不加入成交額門檻：V3.6.10 雖然 Gate C/E 的平均報酬更高，但 Gate D 的 OOS證據、樣本量與壓力測試綜合排名第一，因此先鎖定 Gate D，避免再次資料探勘。')
     else:
         st.info('正式版建議直接使用「全部股票池」執行一次；完成後由自動判定決定是否進下一版資金/持倉引擎。')
+
+
+    st.divider()
+    st.subheader('💼 V3.6.12 資金配置 / 同時持股壓力測試')
+    st.caption('Gate D 已通過正式驗證。本區不再改進場條件，只回答：要同時持有幾檔、每檔放多少資金，策略才不會因資金限制失真。')
+
+    if pack:
+        trades=_v3612_prepare_trades(pack['events'])
+        if trades.empty:
+            st.warning('目前沒有可供資金模擬的 Gate D 交易。')
+        else:
+            c1,c2,c3,c4=st.columns(4)
+            capital=c1.number_input('初始資金',min_value=100000,max_value=10000000,value=1000000,step=100000,key='v3612_capital')
+            fee=c2.number_input('單邊手續費%',min_value=0.0,max_value=1.0,value=0.1425,step=0.01,format='%.4f',key='v3612_fee')
+            tax=c3.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='v3612_tax')
+            slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
+
+            grid=_v3612_scenario_grid(trades,capital,fee,tax,slip)
+            st.markdown('### 🏆 ⑪ 持股數 × 單筆資金比例')
+            st.dataframe(grid,use_container_width=True,hide_index=True)
+
+            if not grid.empty:
+                best=grid.iloc[0]
+                st.success(
+                    f"目前風險效率最佳：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:.0f}%｜"
+                    f"總報酬 {best['總報酬%']:.1f}%｜實現權益MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}"
+                )
+
+            st.markdown('### 🔬 ⑫ 指定配置明細')
+            a,b=st.columns(2)
+            mp=a.select_slider('最大同時持股',[5,10,15,20],value=10,key='v3612_mp')
+            pp=b.select_slider('單筆目標資金%',[5,10,15,20],value=10,key='v3612_pp')
+            eq,lg,stats=_v3612_simulate(trades,capital,mp,pp,fee,tax,slip)
+
+            s1,s2,s3,s4=st.columns(4)
+            s1.metric('總報酬%',f"{stats['總報酬%']:.2f}")
+            s2.metric('實現權益MDD%',f"{stats['實現權益最大回撤%']:.2f}")
+            s3.metric('完成交易',stats['完成交易'])
+            s4.metric('淨PF',f"{stats['淨PF']:.2f}")
+
+            if not eq.empty:
+                chart=eq.set_index('日期')[['實現權益']]
+                st.line_chart(chart,use_container_width=True)
+            with st.expander('查看交易明細'):
+                st.dataframe(lg,use_container_width=True,hide_index=True)
+
+            st.download_button(
+                '⬇️ 下載 V3.6.12 配置情境',
+                grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.12_portfolio_scenarios.csv','text/csv',key='dl_v3612_grid'
+            )
+            if not lg.empty:
+                st.download_button(
+                    '⬇️ 下載 V3.6.12 交易明細',
+                    lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                    'V3.6.12_portfolio_trades.csv','text/csv',key='dl_v3612_trades'
+                )
+
+            st.warning('注意：本版 MDD 是「實現權益最大回撤」，不是逐日 mark-to-market MDD。事件資料沒有完整逐日持倉價格，因此本版刻意不偽裝成真實每日淨值；下一階段若要做逐日Portfolio MDD，必須回抓每筆持倉期間完整日K。')
