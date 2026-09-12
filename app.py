@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
-V3_6_13_LABEL = 'V3.6.13.1｜Gate D 資金容量健診修正版'
+V3_6_13_LABEL = 'V3.6.14｜Gate D 可行容量最佳化版'
 
 st.markdown('''
 <style>
@@ -5659,28 +5659,31 @@ def _v3613_simulate(trades, initial_capital=1_000_000, max_positions=20,
 
 def _v3613_scenario_grid(trades, initial_capital, fee_pct, tax_pct, slippage_pct):
     rows=[]
-    # 5%是目前最有證據的配置；另外測 2.5% / 3% / 4% 以支援 25~40 檔。
-    pos_list=[5,10,15,20,25,30,40]
-    pct_list=[2.5,3.0,4.0,5.0,7.5,10.0]
+    # V3.6.14：只把名目配置 <=100% 視為可行候選；避免 25檔×5%=125% 這類假容量勝出。
+    pos_list=[5,10,15,20,25,30,35,40]
+    pct_list=[2.0,2.5,3.0,3.33,4.0,5.0,7.5,10.0]
     for pos in pos_list:
         for pct in pct_list:
-            # 理論配置上限控制在 125%，容許少量現金動態造成的超配候選，
-            # 真正成交仍受 cash 限制。
-            if pos*pct>125: 
+            if pos*pct>125:
                 continue
             eq,lg,s=_v3613_simulate(trades,initial_capital,pos,pct,fee_pct,tax_pct,slippage_pct)
+            s['名目資金需求%']=float(pos*pct)
+            s['配置可行']=bool(pos*pct<=100.0001)
+            s['現金緩衝%']=float(max(0,100-pos*pct))
             rows.append(s)
     df=pd.DataFrame(rows)
     if not df.empty:
         df['報酬回撤比']=df['總報酬%']/df['實現權益最大回撤%'].abs().replace(0,np.nan)
-        # 容量分數兼顧報酬效率、PF、承接率；不是用來改 Gate D，只做資金容量排序。
-        df['容量效率分數']=(
-            df['報酬回撤比'].fillna(0)*40
-            + df['淨PF'].replace([np.inf,-np.inf],np.nan).fillna(0)*15
-            + df['訊號承接率%'].fillna(0)*0.20
-            - df['容量淘汰率%'].fillna(0)*0.10
-        )
-        df=df.sort_values(['容量效率分數','報酬回撤比','總報酬%'],ascending=[False,False,False]).reset_index(drop=True)
+        feasible=df['配置可行']
+        work=df.loc[feasible].copy()
+        for c in ['總報酬%','淨PF','訊號承接率%','報酬回撤比']:
+            lo,hi=float(work[c].min()),float(work[c].max())
+            work[c+'_N']=0.5 if hi<=lo else (work[c]-lo)/(hi-lo)
+        mdd=work['實現權益最大回撤%'].abs(); lo,hi=float(mdd.min()),float(mdd.max())
+        work['MDD_N']=0.5 if hi<=lo else 1-(mdd-lo)/(hi-lo)
+        work['容量效率分數']=(work['總報酬%_N']*.30+work['MDD_N']*.25+work['淨PF_N']*.20+work['訊號承接率%_N']*.20+work['報酬回撤比_N']*.05)*100
+        df=df.merge(work[['最大同時持股','單筆目標資金%','容量效率分數']],on=['最大同時持股','單筆目標資金%'],how='left')
+        df=df.sort_values(['配置可行','容量效率分數','總報酬%'],ascending=[False,False,False]).reset_index(drop=True)
     return df
 
 # V3.6.10 結論：
@@ -6067,7 +6070,7 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧪 3.6.13.1 容量健診'
+    '🧪 3.6.14 容量最佳化'
 ])
 
 # V3.6.12：法人資料僅供閱讀，不改變排序分數。
@@ -6315,7 +6318,7 @@ with t6:
         st.info('容量引擎需要 Gate D 歷史事件。第一次進入或清除 Streamlit 快取後，請先按上方「建立 Gate D 鎖定事件資料」一次；Gate D 規則仍固定為 90~94＋站上MA200，不重新選模。')
 
     st.divider()
-    st.subheader('🧪 V3.6.13.1 資金容量健診 / 同時持股壓力測試')
+    st.subheader('🧪 V3.6.14 可行資金容量 / 同時持股壓力測試')
     st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
 
     if pack:
@@ -6330,21 +6333,24 @@ with t6:
             slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
 
             grid=_v3613_scenario_grid(trades,capital,fee,tax,slip)
-            st.markdown('### 🏆 ⑪ V3.6.13.1 容量甜蜜點｜5 → 40 檔')
+            st.markdown('### 🏆 ⑪ V3.6.14 可行容量甜蜜點｜5 → 40 檔')
             st.dataframe(grid,use_container_width=True,hide_index=True)
+            bad_n=int((~grid['配置可行']).sum()) if not grid.empty else 0
+            if bad_n:
+                st.warning(f'容量真偽檢查：{bad_n} 組名目配置超過100%（例如25檔×5%=125%），V3.6.14保留顯示供比較，但不允許它們成為最佳容量。')
 
             if not grid.empty:
-                best=grid.iloc[0]
+                best=grid[grid['配置可行']].iloc[0]
                 st.success(
-                    f"目前風險效率最佳：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:.0f}%｜"
+                    f"目前可行容量首選：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:g}%｜名目需求 {best['名目資金需求%']:.1f}%｜"
                     f"總報酬 {best['總報酬%']:.1f}%｜MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}｜"
                     f"承接率 {best['訊號承接率%']:.1f}%｜容量淘汰率 {best['容量淘汰率%']:.1f}%"
                 )
 
             st.markdown('### 🔬 ⑫ 指定容量明細')
             a,b=st.columns(2)
-            mp=a.select_slider('最大同時持股',[5,10,15,20,25,30,40],value=20,key='v3612_mp')
-            pp=b.select_slider('單筆目標資金%',[2.5,3.0,4.0,5.0,7.5,10.0],value=5.0,key='v3612_pp')
+            mp=a.select_slider('最大同時持股',[5,10,15,20,25,30,35,40],value=20,key='v3612_mp')
+            pp=b.select_slider('單筆目標資金%',[2.0,2.5,3.0,3.33,4.0,5.0,7.5,10.0],value=5.0,key='v3612_pp')
             eq,lg,stats=_v3613_simulate(trades,capital,mp,pp,fee,tax,slip)
 
             s1,s2,s3,s4=st.columns(4)
@@ -6371,15 +6377,15 @@ with t6:
                 st.dataframe(lg,use_container_width=True,hide_index=True)
 
             st.download_button(
-                '⬇️ 下載 V3.6.13.1 容量情境',
+                '⬇️ 下載 V3.6.14 容量情境',
                 grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.13.1_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
+                'V3.6.14_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
             )
             if not lg.empty:
                 st.download_button(
-                    '⬇️ 下載 V3.6.13.1 交易明細',
+                    '⬇️ 下載 V3.6.14 交易明細',
                     lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                    'V3.6.13.1_capacity_trades.csv','text/csv',key='dl_v3612_trades'
+                    'V3.6.14_capacity_trades.csv','text/csv',key='dl_v3612_trades'
                 )
 
-            st.warning('V3.6.13.1 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
+            st.warning('V3.6.14 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
