@@ -21,6 +21,8 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
+V3_6_12_1_LABEL = 'V3.6.12.1｜Gate D 資金配置版'
+
 st.markdown('''
 <style>
 .block-container{padding-top:1rem;padding-bottom:2rem}
@@ -5811,7 +5813,8 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
     for _,_q in smart_snapshot.drop_duplicates('股票代號',keep='first').iterrows():
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
-st.title('🖤 黑嚕嚕－台股盤中雷達');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.title('🖤 黑嚕嚕－台股盤中雷達')
+st.caption('V3.6.12.1｜Gate D 正式通過後的資金配置／同時持股壓力測試版');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -5928,7 +5931,7 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🚦 3.6.11 正式進場'
+    '💼 3.6.12 資金配置'
 ])
 
 # V3.6.12：法人資料僅供閱讀，不改變排序分數。
@@ -6083,7 +6086,7 @@ with t5:
 
 with t6:
     st.subheader('🚦 V3.6.12 正式進場引擎｜Gate D 已鎖定')
-    st.caption('V3.6.10 證據排名第一：Gate D＝技術分數 90~94＋站上 MA200。本版不再最佳化門檻，只做正式驗證與產生當下候選。')
+    st.caption('V3.6.12｜Gate D 已完成正式驗證；本版進入資金配置／同時持股壓力測試。')
 
     st.success('🔒 鎖定規則：90 ≤ 黑嚕嚕技術分數 < 95，且股價 ≥ MA200。40日持有＋12%硬停損沿用既有鎖定基準。')
 
