@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
-V3_6_13_LABEL = 'V3.6.13｜Gate D 資金容量健診版'
+V3_6_13_LABEL = 'V3.6.13.1｜Gate D 資金容量健診修正版'
 
 st.markdown('''
 <style>
@@ -5950,7 +5950,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
 st.title('🖤 黑嚕嚕－台股盤中雷達')
-st.caption('V3.6.13｜Gate D 資金容量健診：擴大持股槽位、找真正容量甜蜜點');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.caption('V3.6.13.1｜Gate D 資金容量健診：Gate D 條件已鎖定，本頁只做容量與資金壓力測試。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -6067,7 +6067,7 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '🧪 3.6.13 容量健診'
+    '🧪 3.6.13.1 容量健診'
 ])
 
 # V3.6.12：法人資料僅供閱讀，不改變排序分數。
@@ -6222,7 +6222,7 @@ with t5:
 
 with t6:
     st.subheader('🚦 V3.6.12 正式進場引擎｜Gate D 已鎖定')
-    st.caption('V3.6.12｜Gate D 已完成正式驗證；本版進入資金配置／同時持股壓力測試。')
+    st.caption('V3.6.13.1｜Gate D 已完成正式驗證；本版主流程直接進入資金容量／同時持股壓力測試。')
 
     st.success('🔒 鎖定規則：90 ≤ 黑嚕嚕技術分數 < 95，且股價 ≥ MA200。40日持有＋12%硬停損沿用既有鎖定基準。')
 
@@ -6256,8 +6256,8 @@ with t6:
     min_sample=c3.selectbox('最低有效樣本',[30,50,80,100],index=1,key='v3611_min')
     cooldown=st.radio('同股冷卻交易日',[20,30],horizontal=True,index=0,key='v3611_cd')
 
-    if st.button('▶ 執行 V3.6.12 正式 Gate D 驗證',type='primary',key='run_v3611'):
-        with st.spinner('建立全市場事件 → OOS → 年度 → 市場/成交額/股價分層 → Top5%壓力測試...'):
+    if st.button('▶ 建立 Gate D 鎖定事件資料（首次 / 清快取後才需要）',type='primary',key='run_v3611'):
+        with st.spinner('建立 Gate D 鎖定事件資料 → OOS/年度/分層資料同步建立，供容量引擎使用...'):
             events,diag=_v3610_prepare_events(result,cap,cooldown)
             pack=_v3611_locked_validation(events,min_sample)
             st.session_state['v3611_pack']=pack
@@ -6265,56 +6265,57 @@ with t6:
 
     pack=st.session_state.get('v3611_pack',{})
     if pack:
-        overall=pack['overall']; oos=pack['oos']; year=pack['year']
-        market=pack['market']; turnover=pack['turnover']; price=pack['price']
-        stress=pack['stress']; rules=pack['rules']
-
-        st.markdown('### 📊 ③ 鎖定 Gate D vs 85+基準')
-        st.dataframe(overall,use_container_width=True,hide_index=True)
-
-        st.markdown('### 🧪 ④ OOS｜開發70% vs OOS30%')
-        st.dataframe(oos,use_container_width=True,hide_index=True)
-
-        st.markdown('### 📅 ⑤ 年度穩定度')
-        st.dataframe(year,use_container_width=True,hide_index=True)
-
-        st.markdown('### 🏢 ⑥ 市場別壓力測試')
-        st.dataframe(market,use_container_width=True,hide_index=True)
-
-        c1,c2=st.columns(2)
-        with c1:
-            st.markdown('### 💰 ⑦ 成交額分層')
-            st.dataframe(turnover,use_container_width=True,hide_index=True)
-        with c2:
-            st.markdown('### 💵 ⑧ 股價分層')
-            st.dataframe(price,use_container_width=True,hide_index=True)
-
-        st.markdown('### 💥 ⑨ 移除 Top5% 大贏家')
-        st.dataframe(stress,use_container_width=True,hide_index=True)
-
-        st.markdown('### 🧾 ⑩ 正式啟用判定')
-        st.dataframe(rules,use_container_width=True,hide_index=True)
-        verdict=pack['verdict']
-        if verdict.startswith('🟢'):
-            st.success(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 可進入下一版資金/持倉引擎。")
-        elif verdict.startswith('🟡'):
-            st.warning(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。保留Gate D，但下一版先做資金曲線與持倉壓力測試。")
-        else:
-            st.error(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 暫不進正式交易。")
-
-        st.download_button(
-            '⬇️ 下載 V3.6.12 正式驗證規則',
-            rules.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.12_GateD_formal_validation.csv','text/csv',key='dl_v3611_rules'
-        )
-
-        st.caption('本版刻意不加入成交額門檻：V3.6.10 雖然 Gate C/E 的平均報酬更高，但 Gate D 的 OOS證據、樣本量與壓力測試綜合排名第一，因此先鎖定 Gate D，避免再次資料探勘。')
+        st.success('✅ Gate D 鎖定事件已載入，下方可直接執行 V3.6.13.1 容量健診。')
+        with st.expander('📋 Gate D 既有驗證紀錄（預設收合）', expanded=False):
+            overall=pack['overall']; oos=pack['oos']; year=pack['year']
+            market=pack['market']; turnover=pack['turnover']; price=pack['price']
+            stress=pack['stress']; rules=pack['rules']
+    
+            st.markdown('### 📊 ③ 鎖定 Gate D vs 85+基準')
+            st.dataframe(overall,use_container_width=True,hide_index=True)
+    
+            st.markdown('### 🧪 ④ OOS｜開發70% vs OOS30%')
+            st.dataframe(oos,use_container_width=True,hide_index=True)
+    
+            st.markdown('### 📅 ⑤ 年度穩定度')
+            st.dataframe(year,use_container_width=True,hide_index=True)
+    
+            st.markdown('### 🏢 ⑥ 市場別壓力測試')
+            st.dataframe(market,use_container_width=True,hide_index=True)
+    
+            c1,c2=st.columns(2)
+            with c1:
+                st.markdown('### 💰 ⑦ 成交額分層')
+                st.dataframe(turnover,use_container_width=True,hide_index=True)
+            with c2:
+                st.markdown('### 💵 ⑧ 股價分層')
+                st.dataframe(price,use_container_width=True,hide_index=True)
+    
+            st.markdown('### 💥 ⑨ 移除 Top5% 大贏家')
+            st.dataframe(stress,use_container_width=True,hide_index=True)
+    
+            st.markdown('### 🧾 ⑩ 正式啟用判定')
+            st.dataframe(rules,use_container_width=True,hide_index=True)
+            verdict=pack['verdict']
+            if verdict.startswith('🟢'):
+                st.success(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 可進入下一版資金/持倉引擎。")
+            elif verdict.startswith('🟡'):
+                st.warning(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。保留Gate D，但下一版先做資金曲線與持倉壓力測試。")
+            else:
+                st.error(f"{verdict}｜{pack['passed']}/{pack['total']} 項通過。Gate D 暫不進正式交易。")
+    
+            st.download_button(
+                '⬇️ 下載 V3.6.12 正式驗證規則',
+                rules.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.12_GateD_formal_validation.csv','text/csv',key='dl_v3611_rules'
+            )
+    
+            st.caption('本版刻意不加入成交額門檻：V3.6.10 雖然 Gate C/E 的平均報酬更高，但 Gate D 的 OOS證據、樣本量與壓力測試綜合排名第一，因此先鎖定 Gate D，避免再次資料探勘。')
     else:
-        st.info('正式版建議直接使用「全部股票池」執行一次；完成後由自動判定決定是否進下一版資金/持倉引擎。')
-
+        st.info('容量引擎需要 Gate D 歷史事件。第一次進入或清除 Streamlit 快取後，請先按上方「建立 Gate D 鎖定事件資料」一次；Gate D 規則仍固定為 90~94＋站上MA200，不重新選模。')
 
     st.divider()
-    st.subheader('🧪 V3.6.13 資金容量健診 / 同時持股壓力測試')
+    st.subheader('🧪 V3.6.13.1 資金容量健診 / 同時持股壓力測試')
     st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
 
     if pack:
@@ -6329,7 +6330,7 @@ with t6:
             slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
 
             grid=_v3613_scenario_grid(trades,capital,fee,tax,slip)
-            st.markdown('### 🏆 ⑪ V3.6.13 容量甜蜜點｜5 → 40 檔')
+            st.markdown('### 🏆 ⑪ V3.6.13.1 容量甜蜜點｜5 → 40 檔')
             st.dataframe(grid,use_container_width=True,hide_index=True)
 
             if not grid.empty:
@@ -6370,15 +6371,15 @@ with t6:
                 st.dataframe(lg,use_container_width=True,hide_index=True)
 
             st.download_button(
-                '⬇️ 下載 V3.6.13 容量情境',
+                '⬇️ 下載 V3.6.13.1 容量情境',
                 grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.13_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
+                'V3.6.13.1_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
             )
             if not lg.empty:
                 st.download_button(
-                    '⬇️ 下載 V3.6.13 交易明細',
+                    '⬇️ 下載 V3.6.13.1 交易明細',
                     lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                    'V3.6.13_capacity_trades.csv','text/csv',key='dl_v3612_trades'
+                    'V3.6.13.1_capacity_trades.csv','text/csv',key='dl_v3612_trades'
                 )
 
-            st.warning('V3.6.13 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
+            st.warning('V3.6.13.1 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
