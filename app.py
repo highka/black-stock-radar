@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
-V3_6_12_1_LABEL = 'V3.6.12.1｜Gate D 資金配置版'
+V3_6_13_LABEL = 'V3.6.13｜Gate D 資金容量健診版'
 
 st.markdown('''
 <style>
@@ -5532,19 +5532,155 @@ def _v3612_simulate(trades, initial_capital=1_000_000, max_positions=10,
     }
     return eq,lg,stats
 
-def _v3612_scenario_grid(trades, initial_capital, fee_pct, tax_pct, slippage_pct):
+def _v3613_simulate(trades, initial_capital=1_000_000, max_positions=20,
+                    position_pct=5.0, fee_pct=0.1425, tax_pct=0.30,
+                    slippage_pct=0.10):
+    # 延用 V3.6.12 的成交/成本邏輯，再額外量測「容量是否卡住」
+    if trades is None or trades.empty:
+        return pd.DataFrame(),pd.DataFrame(),{}
+
+    x=trades.copy().sort_values(['進場日','技術分數'],ascending=[True,False])
+    cash=float(initial_capital)
+    realized_equity=float(initial_capital)
+    open_pos=[]
+    logs=[]
+    curve=[{'日期':x['進場日'].min(),'實現權益':realized_equity,'現金':cash,'持倉數':0}]
+    buy_cost=fee_pct/100 + slippage_pct/100
+    sell_cost=fee_pct/100 + tax_pct/100 + slippage_pct/100
+
+    signal_count=0
+    accepted_count=0
+    rejected_slot=0
+    rejected_cash=0
+    rejected_same_stock=0
+    peak_positions=0
+    exposure_samples=[]
+
+    dates=sorted(set(x['進場日']).union(set(x['資金出場日'])))
+    for dt in dates:
+        closing=[p for p in open_pos if p['exit_date']<=dt]
+        for p in closing:
+            gross=p['alloc']*(1+p['gross_ret']/100)
+            proceeds=max(0.0,gross*(1-sell_cost))
+            cash+=proceeds
+            net_pnl=proceeds-p['alloc']*(1+buy_cost)
+            realized_equity+=net_pnl
+            logs.append({
+                '股票':p['股票'],'名稱':p.get('名稱',''),'進場日':p['entry_date'],
+                '出場日':p['exit_date'],'技術分數':p['score'],
+                '投入資金':p['alloc'],'毛報酬%':p['gross_ret'],
+                '淨損益':net_pnl,'淨報酬%':net_pnl/(p['alloc']*(1+buy_cost))*100 if p['alloc'] else 0,
+                '持有天數':p['hold']
+            })
+            open_pos.remove(p)
+
+        todays=x[x['進場日']==dt]
+        held={p['股票'] for p in open_pos}
+        for _,r in todays.iterrows():
+            signal_count += 1
+            sym=str(r['股票'])
+            if sym in held:
+                rejected_same_stock += 1
+                continue
+            if len(open_pos)>=max_positions:
+                rejected_slot += 1
+                continue
+
+            target=max(0.0,realized_equity*(position_pct/100))
+            alloc=min(target, cash/(1+buy_cost))
+            # 若連目標部位的 20% 都放不下，視為資金不足而不硬塞極小部位
+            if alloc<=0 or (target>0 and alloc < target*0.20):
+                rejected_cash += 1
+                continue
+
+            cash-=alloc*(1+buy_cost)
+            open_pos.append({
+                '股票':sym,'名稱':r.get('名稱',''),'entry_date':dt,
+                'exit_date':r['資金出場日'],'score':float(r['技術分數']),
+                'alloc':alloc,'gross_ret':float(r['策略報酬%']),
+                'hold':int(r['持有天數'])
+            })
+            held.add(sym)
+            accepted_count += 1
+
+        peak_positions=max(peak_positions,len(open_pos))
+        gross_open=sum(p['alloc'] for p in open_pos)
+        exposure_samples.append(gross_open/max(realized_equity,1e-9)*100)
+        curve.append({'日期':dt,'實現權益':realized_equity,'現金':cash,'持倉數':len(open_pos)})
+
+    for p in list(open_pos):
+        gross=p['alloc']*(1+p['gross_ret']/100)
+        proceeds=max(0.0,gross*(1-sell_cost))
+        cash+=proceeds
+        net_pnl=proceeds-p['alloc']*(1+buy_cost)
+        realized_equity+=net_pnl
+        logs.append({
+            '股票':p['股票'],'名稱':p.get('名稱',''),'進場日':p['entry_date'],
+            '出場日':p['exit_date'],'技術分數':p['score'],
+            '投入資金':p['alloc'],'毛報酬%':p['gross_ret'],
+            '淨損益':net_pnl,'淨報酬%':net_pnl/(p['alloc']*(1+buy_cost))*100 if p['alloc'] else 0,
+            '持有天數':p['hold']
+        })
+    if dates:
+        curve.append({'日期':max(dates),'實現權益':realized_equity,'現金':cash,'持倉數':0})
+
+    eq=pd.DataFrame(curve).sort_values('日期').drop_duplicates('日期',keep='last')
+    lg=pd.DataFrame(logs)
+    if not eq.empty:
+        peak=eq['實現權益'].cummax()
+        dd=(eq['實現權益']/peak-1)*100
+        max_dd=float(dd.min())
+        avg_positions=float(eq['持倉數'].mean())
+    else:
+        max_dd=np.nan
+        avg_positions=np.nan
+
+    total_ret=(realized_equity/initial_capital-1)*100
+    wins=(lg['淨損益']>0).mean()*100 if len(lg) else np.nan
+    gp=lg.loc[lg['淨損益']>0,'淨損益'].sum() if len(lg) else 0
+    gl=-lg.loc[lg['淨損益']<0,'淨損益'].sum() if len(lg) else 0
+    pf=gp/gl if gl>0 else (np.inf if gp>0 else 0)
+
+    capacity_reject = rejected_slot + rejected_cash
+    stats={
+        '初始資金':initial_capital,'期末實現權益':realized_equity,'總報酬%':total_ret,
+        '實現權益最大回撤%':max_dd,'完成交易':len(lg),'淨勝率%':wins,'淨PF':pf,
+        '最大同時持股':max_positions,'單筆目標資金%':position_pct,
+        '實際最高持股':peak_positions,'平均持股數':avg_positions,
+        '總進場訊號':signal_count,'接受訊號':accepted_count,
+        '槽位不足淘汰':rejected_slot,'資金不足淘汰':rejected_cash,
+        '同股重複略過':rejected_same_stock,
+        '容量淘汰率%':capacity_reject/signal_count*100 if signal_count else 0,
+        '訊號承接率%':accepted_count/signal_count*100 if signal_count else 0,
+        '平均資金使用率%':float(np.mean(exposure_samples)) if exposure_samples else 0,
+        '最高資金使用率%':float(np.max(exposure_samples)) if exposure_samples else 0,
+    }
+    return eq,lg,stats
+
+def _v3613_scenario_grid(trades, initial_capital, fee_pct, tax_pct, slippage_pct):
     rows=[]
-    for pos in [5,10,15,20]:
-        for pct in [5,10,15,20]:
-            # 避免理論配置超過100%
-            if pos*pct>120: continue
-            eq,lg,s=_v3612_simulate(trades,initial_capital,pos,pct,fee_pct,tax_pct,slippage_pct)
+    # 5%是目前最有證據的配置；另外測 2.5% / 3% / 4% 以支援 25~40 檔。
+    pos_list=[5,10,15,20,25,30,40]
+    pct_list=[2.5,3.0,4.0,5.0,7.5,10.0]
+    for pos in pos_list:
+        for pct in pct_list:
+            # 理論配置上限控制在 125%，容許少量現金動態造成的超配候選，
+            # 真正成交仍受 cash 限制。
+            if pos*pct>125: 
+                continue
+            eq,lg,s=_v3613_simulate(trades,initial_capital,pos,pct,fee_pct,tax_pct,slippage_pct)
             rows.append(s)
     df=pd.DataFrame(rows)
     if not df.empty:
-        # 風險效率：報酬 / |回撤|，僅作排序輔助
         df['報酬回撤比']=df['總報酬%']/df['實現權益最大回撤%'].abs().replace(0,np.nan)
-        df=df.sort_values(['報酬回撤比','總報酬%'],ascending=[False,False]).reset_index(drop=True)
+        # 容量分數兼顧報酬效率、PF、承接率；不是用來改 Gate D，只做資金容量排序。
+        df['容量效率分數']=(
+            df['報酬回撤比'].fillna(0)*40
+            + df['淨PF'].replace([np.inf,-np.inf],np.nan).fillna(0)*15
+            + df['訊號承接率%'].fillna(0)*0.20
+            - df['容量淘汰率%'].fillna(0)*0.10
+        )
+        df=df.sort_values(['容量效率分數','報酬回撤比','總報酬%'],ascending=[False,False,False]).reset_index(drop=True)
     return df
 
 # V3.6.10 結論：
@@ -5814,7 +5950,7 @@ if smart_snapshot is not None and not smart_snapshot.empty and '股票代號' in
         quote_map[str(_q['股票代號']).zfill(4)]=_q.to_dict()
 
 st.title('🖤 黑嚕嚕－台股盤中雷達')
-st.caption('V3.6.12.1｜Gate D 正式通過後的資金配置／同時持股壓力測試版');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
+st.caption('V3.6.13｜Gate D 資金容量健診：擴大持股槽位、找真正容量甜蜜點');st.caption('V3.6.12｜法人標籤修正＋進出場風控研究。技術100分不變，法人不加權，新增出場策略實驗。')
 st.markdown('**目前行情策略：B 模式｜🟢 即時優先 → 🔴 最新盤後價備援**')
 _now_tw=taiwan_now();_session=taiwan_market_session(_now_tw)
 a,b,c,d,e=st.columns(5)
@@ -5931,7 +6067,7 @@ t1,t2,t3,t4,t5,t6=st.tabs([
     '📊 分數拆解',
     '📈 個股分析',
     '⭐ 自選股',
-    '💼 3.6.12 資金配置'
+    '🧪 3.6.13 容量健診'
 ])
 
 # V3.6.12：法人資料僅供閱讀，不改變排序分數。
@@ -6178,8 +6314,8 @@ with t6:
 
 
     st.divider()
-    st.subheader('💼 V3.6.12 資金配置 / 同時持股壓力測試')
-    st.caption('Gate D 已通過正式驗證。本區不再改進場條件，只回答：要同時持有幾檔、每檔放多少資金，策略才不會因資金限制失真。')
+    st.subheader('🧪 V3.6.13 資金容量健診 / 同時持股壓力測試')
+    st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
 
     if pack:
         trades=_v3612_prepare_trades(pack['events'])
@@ -6192,28 +6328,40 @@ with t6:
             tax=c3.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='v3612_tax')
             slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
 
-            grid=_v3612_scenario_grid(trades,capital,fee,tax,slip)
-            st.markdown('### 🏆 ⑪ 持股數 × 單筆資金比例')
+            grid=_v3613_scenario_grid(trades,capital,fee,tax,slip)
+            st.markdown('### 🏆 ⑪ V3.6.13 容量甜蜜點｜5 → 40 檔')
             st.dataframe(grid,use_container_width=True,hide_index=True)
 
             if not grid.empty:
                 best=grid.iloc[0]
                 st.success(
                     f"目前風險效率最佳：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:.0f}%｜"
-                    f"總報酬 {best['總報酬%']:.1f}%｜實現權益MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}"
+                    f"總報酬 {best['總報酬%']:.1f}%｜MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}｜"
+                    f"承接率 {best['訊號承接率%']:.1f}%｜容量淘汰率 {best['容量淘汰率%']:.1f}%"
                 )
 
-            st.markdown('### 🔬 ⑫ 指定配置明細')
+            st.markdown('### 🔬 ⑫ 指定容量明細')
             a,b=st.columns(2)
-            mp=a.select_slider('最大同時持股',[5,10,15,20],value=10,key='v3612_mp')
-            pp=b.select_slider('單筆目標資金%',[5,10,15,20],value=10,key='v3612_pp')
-            eq,lg,stats=_v3612_simulate(trades,capital,mp,pp,fee,tax,slip)
+            mp=a.select_slider('最大同時持股',[5,10,15,20,25,30,40],value=20,key='v3612_mp')
+            pp=b.select_slider('單筆目標資金%',[2.5,3.0,4.0,5.0,7.5,10.0],value=5.0,key='v3612_pp')
+            eq,lg,stats=_v3613_simulate(trades,capital,mp,pp,fee,tax,slip)
 
             s1,s2,s3,s4=st.columns(4)
             s1.metric('總報酬%',f"{stats['總報酬%']:.2f}")
             s2.metric('實現權益MDD%',f"{stats['實現權益最大回撤%']:.2f}")
             s3.metric('完成交易',stats['完成交易'])
             s4.metric('淨PF',f"{stats['淨PF']:.2f}")
+
+            q1,q2,q3,q4=st.columns(4)
+            q1.metric('實際最高持股',int(stats['實際最高持股']))
+            q2.metric('平均持股數',f"{stats['平均持股數']:.2f}")
+            q3.metric('訊號承接率%',f"{stats['訊號承接率%']:.1f}")
+            q4.metric('容量淘汰率%',f"{stats['容量淘汰率%']:.1f}")
+            r1,r2,r3,r4=st.columns(4)
+            r1.metric('槽位不足淘汰',int(stats['槽位不足淘汰']))
+            r2.metric('資金不足淘汰',int(stats['資金不足淘汰']))
+            r3.metric('平均資金使用率%',f"{stats['平均資金使用率%']:.1f}")
+            r4.metric('最高資金使用率%',f"{stats['最高資金使用率%']:.1f}")
 
             if not eq.empty:
                 chart=eq.set_index('日期')[['實現權益']]
@@ -6222,15 +6370,15 @@ with t6:
                 st.dataframe(lg,use_container_width=True,hide_index=True)
 
             st.download_button(
-                '⬇️ 下載 V3.6.12 配置情境',
+                '⬇️ 下載 V3.6.13 容量情境',
                 grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.12_portfolio_scenarios.csv','text/csv',key='dl_v3612_grid'
+                'V3.6.13_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
             )
             if not lg.empty:
                 st.download_button(
-                    '⬇️ 下載 V3.6.12 交易明細',
+                    '⬇️ 下載 V3.6.13 交易明細',
                     lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                    'V3.6.12_portfolio_trades.csv','text/csv',key='dl_v3612_trades'
+                    'V3.6.13_capacity_trades.csv','text/csv',key='dl_v3612_trades'
                 )
 
-            st.warning('注意：本版 MDD 是「實現權益最大回撤」，不是逐日 mark-to-market MDD。事件資料沒有完整逐日持倉價格，因此本版刻意不偽裝成真實每日淨值；下一階段若要做逐日Portfolio MDD，必須回抓每筆持倉期間完整日K。')
+            st.warning('V3.6.13 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
