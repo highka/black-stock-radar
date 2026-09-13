@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
-V3_6_13_LABEL = 'V3.6.15｜Gate D 真實逐日 MTM 資金曲線版'
+V3_6_13_LABEL = 'V3.6.16｜Gate D 資金配置鎖定 / MTM 穩健度壓力測試'
 
 st.markdown('''
 <style>
@@ -6609,3 +6609,145 @@ if pack:
         st.info('尚未建立 V3.6.15 MTM 資料。請按「▶ 執行 V3.6.15 真實 MTM 驗證」。')
 else:
     st.info('請先建立 Gate D 鎖定事件資料，再執行 V3.6.15。')
+
+
+# ============================================================
+# 🔒 V3.6.16 Gate D 資金配置鎖定 / MTM 穩健度壓力測試
+# 依 V3.6.15 實測：25檔×3.33% 在 Calmar、MDD、PF、資金可行性之間最平衡。
+# 本版不再搜尋容量；固定 Gate D = 90~94 + 站上MA200，配置 = 25檔×3.33%，
+# 專門驗證年度、月度、回撤持續時間與壓力成本敏感度。
+# ============================================================
+
+def _v3616_period_returns(eq, freq='YE'):
+    if eq is None or eq.empty:return pd.DataFrame()
+    z=eq[['日期','MTM權益']].copy().sort_values('日期')
+    z['日期']=pd.to_datetime(z['日期']); z=z.set_index('日期')
+    try:
+        last=z['MTM權益'].resample(freq).last(); first=z['MTM權益'].resample(freq).first()
+    except Exception:
+        alias='Y' if freq=='YE' else freq
+        last=z['MTM權益'].resample(alias).last(); first=z['MTM權益'].resample(alias).first()
+    r=(last/first-1)*100
+    out=pd.DataFrame({'期間':r.index,'報酬%':r.values}).dropna()
+    return out
+
+def _v3616_drawdown_episodes(eq):
+    if eq is None or eq.empty:return pd.DataFrame(),{}
+    z=eq[['日期','MTM權益']].copy().sort_values('日期').reset_index(drop=True)
+    z['高水位']=z['MTM權益'].cummax();z['回撤%']=(z['MTM權益']/z['高水位']-1)*100
+    episodes=[]; in_dd=False; start_i=None
+    for i,row in z.iterrows():
+        dd=float(row['回撤%'])
+        if dd< -1e-10 and not in_dd:
+            in_dd=True;start_i=max(i-1,0)
+        if in_dd and (dd>=-1e-10 or i==len(z)-1):
+            end_i=i; seg=z.iloc[start_i:end_i+1]
+            trough_idx=seg['回撤%'].idxmin()
+            recovered=bool(dd>=-1e-10)
+            episodes.append({'高點日':z.loc[start_i,'日期'],'谷底日':z.loc[trough_idx,'日期'],
+                             '恢復日':z.loc[end_i,'日期'] if recovered else pd.NaT,
+                             '最大回撤%':float(z.loc[trough_idx,'回撤%']),
+                             '回撤交易日':int(end_i-start_i),'已恢復':recovered})
+            in_dd=False
+    d=pd.DataFrame(episodes)
+    stats={}
+    if not d.empty:
+        worst=d.loc[d['最大回撤%'].idxmin()]
+        stats={'最深回撤%':float(worst['最大回撤%']),'最深回撤高點日':worst['高點日'],
+               '最深回撤谷底日':worst['谷底日'],'最深回撤恢復日':worst['恢復日'],
+               '最長回撤交易日':int(d['回撤交易日'].max()),'回撤事件數':len(d),
+               '未恢復回撤數':int((~d['已恢復']).sum())}
+    return d,stats
+
+def _v3616_yearly(eq,logs):
+    if eq is None or eq.empty:return pd.DataFrame()
+    z=eq[['日期','MTM權益']].copy();z['日期']=pd.to_datetime(z['日期']);z['年度']=z['日期'].dt.year
+    rows=[]
+    for y,g in z.groupby('年度'):
+        g=g.sort_values('日期');start=float(g.iloc[0]['MTM權益']);end=float(g.iloc[-1]['MTM權益'])
+        peak=g['MTM權益'].cummax();mdd=float((g['MTM權益']/peak-1).min()*100)
+        lg=logs.copy() if logs is not None else pd.DataFrame()
+        if not lg.empty:
+            lg['出場日']=pd.to_datetime(lg['出場日']);ly=lg[lg['出場日'].dt.year==y]
+            gp=ly.loc[ly['淨損益']>0,'淨損益'].sum();gl=-ly.loc[ly['淨損益']<0,'淨損益'].sum()
+            pf=gp/gl if gl>0 else (np.inf if gp>0 else 0);wr=(ly['淨損益']>0).mean()*100 if len(ly) else np.nan
+        else: ly=pd.DataFrame();pf=np.nan;wr=np.nan
+        rows.append({'年度':int(y),'年度報酬%':(end/start-1)*100 if start else np.nan,'年度MDD%':mdd,
+                     '完成交易':len(ly),'淨勝率%':wr,'淨PF':pf,'年末權益':end})
+    return pd.DataFrame(rows)
+
+def _v3616_cost_stress(trades,prices,capital,base_fee,base_tax,base_slip):
+    cases=[('基準成本',base_fee,base_tax,base_slip),('滑價0.20%',base_fee,base_tax,0.20),
+           ('滑價0.30%',base_fee,base_tax,0.30),('手續費+滑價壓力',max(base_fee,0.20),base_tax,0.30)]
+    rows=[]
+    for name,fee16,tax16,slip16 in cases:
+        eq,lg,stt=_v3615_true_mtm(trades,prices,capital,25,3.33,fee16,tax16,slip16)
+        if stt:
+            rows.append({'情境':name,'手續費%':fee16,'交易稅%':tax16,'滑價%':slip16,
+                         '總報酬%':stt['總報酬%'],'CAGR%':stt['CAGR%'],'MTM_MDD%':stt['真實MTM_MDD%'],
+                         'Calmar':stt['Calmar'],'淨PF':stt['淨PF'],'完成交易':stt['完成交易']})
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('🔒 V3.6.16 Gate D 資金配置鎖定 / MTM 穩健度壓力測試')
+st.caption('依 V3.6.15 結果鎖定第一版資金模型：Gate D＝90~94＋站上MA200；最大同時持股25檔；單筆目標資金3.33%。本區不再最佳化參數，只驗證穩健度。')
+
+mtm_trades16=st.session_state.get('v3615_trades',pd.DataFrame())
+mtm_prices16=st.session_state.get('v3615_prices',{})
+if not mtm_trades16.empty and mtm_prices16:
+    eq16,lg16,st16=_v3615_true_mtm(mtm_trades16,mtm_prices16,capital,25,3.33,fee,tax,slip)
+    if st16:
+        st.success(f"🔒 暫定鎖定：25檔 × 3.33%｜總報酬 {st16['總報酬%']:.1f}%｜CAGR {st16['CAGR%']:.1f}%｜MTM MDD {st16['真實MTM_MDD%']:.1f}%｜Calmar {st16['Calmar']:.2f}｜淨PF {st16['淨PF']:.2f}")
+        a,b,c,d=st.columns(4)
+        a.metric('鎖定最大持股','25檔');b.metric('鎖定單筆資金','3.33%');c.metric('名目滿倉','83.25%');d.metric('現金緩衝','16.75%')
+
+        st.markdown('### 📅 ⑮ 年度 MTM 穩定度')
+        yr16=_v3616_yearly(eq16,lg16);st.dataframe(yr16.round(4),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🩸 ⑯ 回撤深度 / 恢復時間')
+        dd16,dds16=_v3616_drawdown_episodes(eq16)
+        if dds16:
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric('最深MDD%',f"{dds16['最深回撤%']:.2f}");c2.metric('最長回撤交易日',dds16['最長回撤交易日'])
+            c3.metric('回撤事件數',dds16['回撤事件數']);c4.metric('未恢復回撤',dds16['未恢復回撤數'])
+            st.caption(f"最深回撤：{pd.Timestamp(dds16['最深回撤高點日']).strftime('%Y-%m-%d')} → {pd.Timestamp(dds16['最深回撤谷底日']).strftime('%Y-%m-%d')}" + (f" → 恢復 {pd.Timestamp(dds16['最深回撤恢復日']).strftime('%Y-%m-%d')}" if pd.notna(dds16['最深回撤恢復日']) else '｜尚未恢復'))
+        with st.expander('查看所有回撤事件'):
+            st.dataframe(dd16.round(4),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🗓️ ⑰ 月報酬分布')
+        mon16=_v3616_period_returns(eq16,'ME')
+        if not mon16.empty:
+            mon16['月份']=pd.to_datetime(mon16['期間']).dt.strftime('%Y-%m')
+            neg=int((mon16['報酬%']<0).sum());pos=int((mon16['報酬%']>0).sum())
+            q1,q2,q3,q4=st.columns(4)
+            q1.metric('正報酬月',pos);q2.metric('負報酬月',neg);q3.metric('最佳月%',f"{mon16['報酬%'].max():.2f}");q4.metric('最差月%',f"{mon16['報酬%'].min():.2f}")
+            st.dataframe(mon16[['月份','報酬%']].round(4),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🧯 ⑱ 交易成本 / 滑價壓力測試')
+        cost16=_v3616_cost_stress(mtm_trades16,mtm_prices16,capital,fee,tax,slip)
+        st.dataframe(cost16.round(4),use_container_width=True,hide_index=True)
+
+        # 自動判定：不是重新最佳化，而是判斷是否可進實盤模擬層
+        annual_ok=(not yr16.empty and (yr16['年度報酬%']>0).mean()>=2/3)
+        pf_ok=float(st16['淨PF'])>=1.5
+        mdd_ok=float(st16['真實MTM_MDD%'])>=-25
+        calmar_ok=float(st16['Calmar'])>=1.5
+        stress_ok=(not cost16.empty and float(cost16.iloc[-1]['淨PF'])>=1.3)
+        st.markdown('### 🧾 ⑲ V3.6.16 自動判定')
+        checks=pd.DataFrame([
+            {'驗證':'至少2/3年度正報酬','結果':f"{(yr16['年度報酬%']>0).mean()*100:.1f}%" if not yr16.empty else 'N/A','通過':annual_ok},
+            {'驗證':'淨PF ≥ 1.50','結果':f"{st16['淨PF']:.2f}",'通過':pf_ok},
+            {'驗證':'真正MTM MDD ≥ -25%','結果':f"{st16['真實MTM_MDD%']:.2f}%",'通過':mdd_ok},
+            {'驗證':'Calmar ≥ 1.50','結果':f"{st16['Calmar']:.2f}",'通過':calmar_ok},
+            {'驗證':'高成本壓力淨PF ≥ 1.30','結果':f"{cost16.iloc[-1]['淨PF']:.2f}" if not cost16.empty else 'N/A','通過':stress_ok},
+        ])
+        st.dataframe(checks,use_container_width=True,hide_index=True)
+        if bool(checks['通過'].all()):
+            st.success('🟢 V3.6.16 通過：25檔×3.33% 可升級為 Gate D 第一版正式資金配置，下一階段應做訊號排序 / 槽位競爭與實盤執行規則。')
+        else:
+            st.warning('🟡 V3.6.16 尚有壓力條件未通過：先看未通過項目，不自動改 Gate D。')
+
+        st.download_button('⬇️ 下載 V3.6.16 年度穩定度',yr16.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.16_yearly.csv','text/csv',key='dl_v3616_year')
+        st.download_button('⬇️ 下載 V3.6.16 回撤事件',dd16.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.16_drawdowns.csv','text/csv',key='dl_v3616_dd')
+else:
+    st.info('請先在上方執行 V3.6.15 真實 MTM 驗證；完成後 V3.6.16 會直接沿用同一批完整日K，不需要再下載一次。')
