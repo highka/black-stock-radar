@@ -6878,3 +6878,450 @@ if not tr17.empty and px17:
         st.download_button('⬇️ 下載 V3.6.17 年度穩定度',yr17.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.17_ranking_yearly.csv','text/csv',key='dl_v3617_year')
 else:
     st.info('請先完成上方 V3.6.15 真實 MTM 資料重建；V3.6.17 會直接沿用同一批 Gate D 交易與日K。')
+
+
+# ============================================================
+# 🚦 V3.6.18 訊號排隊 / 槽位釋放 / 實盤執行狀態機
+# 已鎖定：
+#   Gate D = 90~94 + 站上MA200
+#   最大持股 = 25
+#   單筆資金 = 3.33%
+#   排序 = 分數→成交額→近MA200
+#
+# 本版只測「當日沒槽位的訊號，要不要短暫排隊等待槽位釋放」。
+# 不改 Gate、不改分數、不改資金比例。
+# ============================================================
+
+V3618_LOCKED_RANK = '分數→成交額→近MA200'
+V3618_MAX_POS = 25
+V3618_POS_PCT = 3.33
+
+def _v3618_rebuild_from_date(row, entry_date, price_map):
+    """把原始 Gate D 訊號延後到指定交易日進場，重新依鎖定的40日/硬停損12%規則建立交易。
+    只用當時之後的價格路徑，不偷用原本出場價。
+    """
+    sym = str(row['股票']).zfill(4)
+    d = price_map.get(sym)
+    if d is None or d.empty:
+        return None
+    dt = pd.Timestamp(entry_date).normalize()
+    idx_norm = pd.DatetimeIndex(d.index).normalize()
+    loc = np.where(idx_norm == dt)[0]
+    if len(loc) == 0:
+        return None
+    i = int(loc[-1])
+    tr = _v368_locked_baseline_trade(d, i)
+    if not tr:
+        return None
+    rr = row.to_dict()
+    rr['原始訊號日'] = pd.Timestamp(row['進場日']).normalize()
+    rr['進場日'] = pd.Timestamp(tr['進場日']).normalize()
+    rr['資金出場日'] = pd.Timestamp(tr['出場日']).normalize()
+    rr['持有交易日'] = int(tr.get('持有天數', 40))
+    rr['重建進場價'] = float(tr['進場價'])
+    rr['重建出場價'] = float(tr['出場價'])
+    rr['重建毛報酬%'] = float(tr['報酬%'])
+    rr['重建出場原因'] = str(tr.get('出場原因', ''))
+    return rr
+
+def _v3618_trade_dates(price_map, trades):
+    if trades is None or trades.empty:
+        return []
+    start = pd.Timestamp(trades['進場日'].min()).normalize()
+    # 留足排隊與40日出場所需日期
+    all_dates = set()
+    for sym in trades['股票'].astype(str).str.zfill(4).unique():
+        d = price_map.get(sym)
+        if d is None or d.empty:
+            continue
+        for v in d.index:
+            dt = pd.Timestamp(v).normalize()
+            if dt >= start:
+                all_dates.add(dt)
+    return sorted(all_dates)
+
+def _v3618_queue_mtm(trades, price_map, initial_capital, queue_days=0,
+                     fee_pct=0.1425, tax_pct=0.30, slippage_pct=0.10):
+    """事件驅動 MTM 狀態機。
+    狀態：NEW_SIGNAL -> QUEUED -> FILLED / EXPIRED / DUPLICATE
+    queue_days=0 等同「當日沒槽位直接放棄」。
+    排隊天數以市場交易日計算；每天先出場釋放槽位，再處理舊排隊，再處理新訊號。
+    """
+    if trades is None or trades.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+
+    ranked = _v3617_ranked_trades(trades, V3618_LOCKED_RANK).copy()
+    ranked['進場日'] = pd.to_datetime(ranked['進場日']).dt.normalize()
+    dates = _v3618_trade_dates(price_map, ranked)
+    if not dates:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+
+    date_pos = {d:i for i,d in enumerate(dates)}
+    buy_fee = fee_pct/100
+    sell_fee = (fee_pct+tax_pct)/100
+    slip = slippage_pct/100
+
+    cash = float(initial_capital)
+    open_pos = []
+    pending = []
+    logs = []
+    audit = []
+    curve = []
+
+    signal_count = accepted = rejected_cash = rejected_same = 0
+    queued_count = expired_count = delayed_fills = 0
+    slot_block_events = 0
+    wait_days = []
+
+    def mtm_equity(dt):
+        mv = 0.0
+        for p in open_pos:
+            px = _v3615_close_on(price_map, p['股票'], dt, p['last_px'])
+            if np.isfinite(px):
+                p['last_px'] = px
+            mv += p['shares'] * p['last_px']
+        return cash + mv, mv
+
+    def held_symbols():
+        return {p['股票'] for p in open_pos}
+
+    def pending_symbols():
+        return {str(p['row']['股票']).zfill(4) for p in pending}
+
+    def try_fill(row, dt, original_signal_date, waited):
+        nonlocal cash, accepted, rejected_cash, rejected_same, delayed_fills
+        sym = str(row['股票']).zfill(4)
+        if sym in held_symbols():
+            rejected_same += 1
+            audit.append({'日期':dt,'股票':sym,'狀態':'DUPLICATE_HELD',
+                          '原始訊號日':original_signal_date,'等待交易日':waited})
+            return 'duplicate'
+
+        rebuilt = _v3618_rebuild_from_date(row, dt, price_map)
+        if rebuilt is None:
+            audit.append({'日期':dt,'股票':sym,'狀態':'NO_PRICE',
+                          '原始訊號日':original_signal_date,'等待交易日':waited})
+            return 'no_price'
+
+        eq_now, _ = mtm_equity(dt)
+        target = max(0.0, eq_now * V3618_POS_PCT / 100)
+        entry_raw = float(rebuilt['重建進場價'])
+        entry_exec = entry_raw * (1 + slip)
+        per_share = entry_exec * (1 + buy_fee)
+        alloc = min(target, cash)
+        if alloc <= 0 or (target > 0 and alloc < target * .20):
+            rejected_cash += 1
+            audit.append({'日期':dt,'股票':sym,'狀態':'NO_CASH',
+                          '原始訊號日':original_signal_date,'等待交易日':waited})
+            return 'cash'
+
+        shares = alloc / per_share
+        actual_cost = shares * per_share
+        cash -= actual_cost
+        open_pos.append({
+            '股票':sym,'名稱':rebuilt.get('名稱',''),
+            'entry_date':pd.Timestamp(rebuilt['進場日']).normalize(),
+            'exit_date':pd.Timestamp(rebuilt['資金出場日']).normalize(),
+            'score':float(pd.to_numeric(row.get('技術分數原值', row.get('技術分數',0)), errors='coerce')),
+            'shares':shares,'entry_raw':entry_raw,'entry_exec':entry_exec,
+            'exit_price':float(rebuilt['重建出場價']),
+            'reason':str(rebuilt['重建出場原因']),
+            'hold':int(rebuilt['持有交易日']),'last_px':entry_raw,
+            'original_signal_date':pd.Timestamp(original_signal_date).normalize(),
+            'waited':int(waited)
+        })
+        accepted += 1
+        if waited > 0:
+            delayed_fills += 1
+            wait_days.append(waited)
+        audit.append({'日期':dt,'股票':sym,'狀態':'FILLED_DELAYED' if waited>0 else 'FILLED_SAME_DAY',
+                      '原始訊號日':original_signal_date,'等待交易日':waited})
+        return 'filled'
+
+    for dt in dates:
+        # 1) EXIT：先出場，當天立即釋放槽位
+        closing = [p for p in open_pos if p['exit_date'] <= dt]
+        for p in closing:
+            exit_raw = float(p['exit_price'])
+            exit_exec = exit_raw * (1-slip)
+            proceeds = p['shares'] * exit_exec * (1-sell_fee)
+            cash += proceeds
+            cost = p['shares'] * p['entry_exec'] * (1+buy_fee)
+            pnl = proceeds - cost
+            logs.append({
+                '股票':p['股票'],'名稱':p['名稱'],
+                '原始訊號日':p['original_signal_date'],
+                '進場日':p['entry_date'],'出場日':p['exit_date'],
+                '等待交易日':p['waited'],'技術分數':p['score'],
+                '投入資金':cost,'進場價':p['entry_raw'],'出場價':exit_raw,
+                '出場原因':p['reason'],'淨損益':pnl,
+                '淨報酬%':pnl/cost*100 if cost else 0,
+                '持有交易日':p['hold']
+            })
+            audit.append({'日期':dt,'股票':p['股票'],'狀態':'EXIT',
+                          '原始訊號日':p['original_signal_date'],'等待交易日':p['waited']})
+            open_pos.remove(p)
+
+        # 2) QUEUE：先處理昨天以前排隊的訊號
+        still_pending = []
+        if pending:
+            pending = sorted(
+                pending,
+                key=lambda p: (
+                    date_pos.get(p['signal_date'], 10**9),
+                    -float(pd.to_numeric(p['row'].get('技術分數',0),errors='coerce') or 0),
+                    -float(pd.to_numeric(p['row'].get('_liq',0),errors='coerce') or 0),
+                    float(pd.to_numeric(p['row'].get('_dist',999),errors='coerce') or 999),
+                )
+            )
+        for p in pending:
+            waited = date_pos.get(dt,0) - date_pos.get(p['signal_date'],0)
+            sym = str(p['row']['股票']).zfill(4)
+            if waited > queue_days:
+                expired_count += 1
+                audit.append({'日期':dt,'股票':sym,'狀態':'EXPIRED',
+                              '原始訊號日':p['signal_date'],'等待交易日':waited})
+                continue
+            if sym in held_symbols():
+                rejected_same += 1
+                audit.append({'日期':dt,'股票':sym,'狀態':'DUPLICATE_HELD',
+                              '原始訊號日':p['signal_date'],'等待交易日':waited})
+                continue
+            if len(open_pos) >= V3618_MAX_POS:
+                still_pending.append(p)
+                continue
+            result = try_fill(p['row'], dt, p['signal_date'], waited)
+            if result in ('cash','no_price'):
+                still_pending.append(p)
+        pending = still_pending
+
+        # 3) NEW SIGNAL：處理今日新訊號
+        todays = ranked[ranked['進場日'] == dt]
+        for _, r in todays.iterrows():
+            signal_count += 1
+            sym = str(r['股票']).zfill(4)
+            if sym in held_symbols() or sym in pending_symbols():
+                rejected_same += 1
+                audit.append({'日期':dt,'股票':sym,'狀態':'DUPLICATE_SIGNAL',
+                              '原始訊號日':dt,'等待交易日':0})
+                continue
+            if len(open_pos) < V3618_MAX_POS:
+                try_fill(r, dt, dt, 0)
+            else:
+                slot_block_events += 1
+                if queue_days > 0:
+                    pending.append({'row':r.copy(),'signal_date':dt})
+                    queued_count += 1
+                    audit.append({'日期':dt,'股票':sym,'狀態':'QUEUED',
+                                  '原始訊號日':dt,'等待交易日':0})
+                else:
+                    expired_count += 1
+                    audit.append({'日期':dt,'股票':sym,'狀態':'REJECTED_SLOT',
+                                  '原始訊號日':dt,'等待交易日':0})
+
+        eq, mv = mtm_equity(dt)
+        curve.append({
+            '日期':dt,'MTM權益':eq,'現金':cash,'持倉市值':mv,'持倉數':len(open_pos),
+            '排隊數':len(pending),
+            '資金使用率%':mv/eq*100 if eq>0 else np.nan
+        })
+
+    # 資料結尾仍在排隊者視為未成交到期
+    for p in pending:
+        expired_count += 1
+        sym = str(p['row']['股票']).zfill(4)
+        audit.append({'日期':dates[-1],'股票':sym,'狀態':'END_OF_DATA',
+                      '原始訊號日':p['signal_date'],
+                      '等待交易日':date_pos[dates[-1]]-date_pos.get(p['signal_date'],0)})
+
+    eq = pd.DataFrame(curve).sort_values('日期').drop_duplicates('日期',keep='last')
+    lg = pd.DataFrame(logs)
+    au = pd.DataFrame(audit)
+    if eq.empty:
+        return eq, lg, au, {}
+
+    eq['權益高點'] = eq['MTM權益'].cummax()
+    eq['回撤%'] = (eq['MTM權益']/eq['權益高點']-1)*100
+    mdd = float(eq['回撤%'].min())
+    final = float(eq.iloc[-1]['MTM權益'])
+    total_ret = (final/initial_capital-1)*100
+    years = max((eq.iloc[-1]['日期']-eq.iloc[0]['日期']).days/365.25,1/365.25)
+    cagr = ((final/initial_capital)**(1/years)-1)*100 if final>0 else -100.0
+    calmar = cagr/abs(mdd) if mdd<0 else np.nan
+    wins = (lg['淨損益']>0).mean()*100 if len(lg) else np.nan
+    gp = lg.loc[lg['淨損益']>0,'淨損益'].sum() if len(lg) else 0
+    gl = -lg.loc[lg['淨損益']<0,'淨損益'].sum() if len(lg) else 0
+    pf = gp/gl if gl>0 else (np.inf if gp>0 else 0)
+
+    stats = {
+        '排隊有效交易日':int(queue_days),
+        '總報酬%':total_ret,'CAGR%':cagr,'真實MTM_MDD%':mdd,'Calmar':calmar,
+        '淨PF':pf,'淨勝率%':wins,'完成交易':len(lg),
+        '總進場訊號':signal_count,'接受訊號':accepted,
+        '訊號承接率%':accepted/signal_count*100 if signal_count else 0,
+        '曾進排隊':queued_count,'延後成交':delayed_fills,'到期/槽位淘汰':expired_count,
+        '槽位壓力事件':slot_block_events,'資金不足':rejected_cash,'同股重複':rejected_same,
+        '平均等待交易日':float(np.mean(wait_days)) if wait_days else 0.0,
+        '最高排隊數':int(eq['排隊數'].max()) if '排隊數' in eq else 0,
+        '實際最高持股':int(eq['持倉數'].max()),
+        '平均持股數':float(eq['持倉數'].mean()),
+        '平均資金使用率%':float(eq['資金使用率%'].mean()),
+        '最高資金使用率%':float(eq['資金使用率%'].max())
+    }
+    return eq, lg, au, stats
+
+def _v3618_yearly(eq, lg):
+    if eq is None or eq.empty:
+        return pd.DataFrame()
+    rows=[]
+    z=eq.copy()
+    z['年度']=pd.to_datetime(z['日期']).dt.year
+    t=lg.copy() if lg is not None else pd.DataFrame()
+    if not t.empty:
+        t['年度']=pd.to_datetime(t['出場日']).dt.year
+    for y,g in z.groupby('年度'):
+        g=g.sort_values('日期')
+        first=float(g.iloc[0]['MTM權益']); last=float(g.iloc[-1]['MTM權益'])
+        ret=(last/first-1)*100 if first else np.nan
+        peak=g['MTM權益'].cummax()
+        mdd=float(((g['MTM權益']/peak)-1).min()*100)
+        gy=t[t['年度']==y] if not t.empty else pd.DataFrame()
+        gp=gy.loc[gy['淨損益']>0,'淨損益'].sum() if not gy.empty else 0
+        gl=-gy.loc[gy['淨損益']<0,'淨損益'].sum() if not gy.empty else 0
+        pf=gp/gl if gl>0 else (np.inf if gp>0 else 0)
+        rows.append({'年度':int(y),'年度報酬%':ret,'年度MDD%':mdd,'淨PF':pf,
+                     '淨勝率%':(gy['淨損益']>0).mean()*100 if not gy.empty else np.nan,
+                     '完成交易':len(gy)})
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('🚦 V3.6.18 訊號排隊 / 槽位釋放 / 實盤執行狀態機')
+st.caption('V3.6.17 已鎖定「分數→成交額→近MA200」。本版不再改選股，只測：25槽位滿載時，被擋下的 Gate D 訊號是否值得排隊 1～3 個交易日。延後成交會用延後當天收盤重新建立40日/硬停損12%交易，不沿用原訊號日的進出場價。')
+
+tr18 = st.session_state.get('v3615_trades', pd.DataFrame())
+px18 = st.session_state.get('v3615_prices', {})
+
+if not tr18.empty and px18:
+    packs18={}
+    rows18=[]
+    for qd in [0,1,2,3]:
+        eq18,lg18,au18,st18=_v3618_queue_mtm(tr18,px18,capital,qd,fee,tax,slip)
+        if st18:
+            rows18.append(st18)
+            packs18[qd]=(eq18,lg18,au18,st18)
+    cmp18=pd.DataFrame(rows18)
+
+    if not cmp18.empty:
+        b18=cmp18[cmp18['排隊有效交易日']==0].iloc[0]
+        cmp18['CAGR改善ppt']=cmp18['CAGR%']-float(b18['CAGR%'])
+        cmp18['MDD改善ppt']=cmp18['真實MTM_MDD%']-float(b18['真實MTM_MDD%'])
+        cmp18['PF改善']=cmp18['淨PF']-float(b18['淨PF'])
+        cmp18['Calmar改善']=cmp18['Calmar']-float(b18['Calmar'])
+
+        st.markdown('### 🏆 ㉔ 排隊有效期 PK｜0 / 1 / 2 / 3 交易日')
+        st.dataframe(cmp18.round(4),use_container_width=True,hide_index=True)
+
+        yr_rows=[]
+        for qd,(eq18,lg18,au18,st18) in packs18.items():
+            yy=_v3618_yearly(eq18,lg18)
+            for _,r in yy.iterrows():
+                rr=r.to_dict();rr['排隊有效交易日']=qd;yr_rows.append(rr)
+        yr18=pd.DataFrame(yr_rows)
+        st.markdown('### 📅 ㉕ 排隊規則年度穩定度')
+        st.dataframe(yr18.round(4),use_container_width=True,hide_index=True)
+
+        # 排隊事件診斷
+        diag=[]
+        for qd,(eq18,lg18,au18,st18) in packs18.items():
+            diag.append({
+                '排隊有效交易日':qd,
+                '總訊號':st18['總進場訊號'],'接受訊號':st18['接受訊號'],
+                '承接率%':st18['訊號承接率%'],'曾進排隊':st18['曾進排隊'],
+                '延後成交':st18['延後成交'],'到期/槽位淘汰':st18['到期/槽位淘汰'],
+                '平均等待交易日':st18['平均等待交易日'],'最高排隊數':st18['最高排隊數'],
+                '同股重複':st18['同股重複'],'資金不足':st18['資金不足']
+            })
+        diag18=pd.DataFrame(diag)
+        st.markdown('### 🚥 ㉖ 狀態機 / 排隊壓力診斷')
+        st.dataframe(diag18.round(4),use_container_width=True,hide_index=True)
+
+        # 穩健判定：不以單純總報酬選 winner
+        ranks=[]
+        for _,r in cmp18.iterrows():
+            qd=int(r['排隊有效交易日'])
+            yy=yr18[yr18['排隊有效交易日']==qd]
+            pos=float((yy['年度報酬%']>0).mean()) if len(yy) else 0
+            ranks.append({
+                '排隊有效交易日':qd,'正報酬年度比例%':pos*100,
+                'Calmar':r['Calmar'],'淨PF':r['淨PF'],'CAGR%':r['CAGR%'],
+                'MTM_MDD%':r['真實MTM_MDD%'],'承接率%':r['訊號承接率%'],
+                '年度穩定通過':pos>=2/3
+            })
+        rank18=pd.DataFrame(ranks).sort_values(
+            ['年度穩定通過','Calmar','淨PF','CAGR%'],
+            ascending=[False,False,False,False]
+        ).reset_index(drop=True)
+
+        st.markdown('### 🧠 ㉗ V3.6.18 穩健排名')
+        st.dataframe(rank18.round(4),use_container_width=True,hide_index=True)
+
+        w18=rank18.iloc[0]
+        qwin=int(w18['排隊有效交易日'])
+        wr18=cmp18[cmp18['排隊有效交易日']==qwin].iloc[0]
+
+        # 採用排隊的門檻比一般最佳化更嚴格：
+        # 若排隊沒有明確改善，就維持 queue=0，實盤最簡單。
+        annual_ok=bool(w18['年度穩定通過'])
+        pf_ok=float(wr18['淨PF']) >= float(b18['淨PF']) - 0.03
+        mdd_ok=float(wr18['真實MTM_MDD%']) >= float(b18['真實MTM_MDD%']) - 2.0
+        calmar_ok=float(wr18['Calmar']) >= float(b18['Calmar'])
+        meaningful = (qwin==0) or (
+            float(wr18['Calmar']) >= float(b18['Calmar']) + 0.05
+            or float(wr18['CAGR%']) >= float(b18['CAGR%']) + 1.0
+            or float(wr18['淨PF']) >= float(b18['淨PF']) + 0.05
+        )
+
+        checks18=pd.DataFrame([
+            {'驗證':'至少2/3年度正報酬','結果':f"{w18['正報酬年度比例%']:.1f}%",'通過':annual_ok},
+            {'驗證':'淨PF不明顯劣於不排隊','結果':f"{wr18['淨PF']:.2f} vs {b18['淨PF']:.2f}",'通過':pf_ok},
+            {'驗證':'MDD不得比不排隊惡化超過2ppt','結果':f"{wr18['真實MTM_MDD%']:.2f}% vs {b18['真實MTM_MDD%']:.2f}%",'通過':mdd_ok},
+            {'驗證':'Calmar不低於不排隊','結果':f"{wr18['Calmar']:.2f} vs {b18['Calmar']:.2f}",'通過':calmar_ok},
+            {'驗證':'若要排隊，至少有一項實質改善','結果':f"候選={qwin}交易日",'通過':meaningful},
+        ])
+        st.markdown('### 🧾 ㉘ V3.6.18 正式執行判定')
+        st.dataframe(checks18,use_container_width=True,hide_index=True)
+
+        if bool(checks18['通過'].all()):
+            if qwin==0:
+                st.success('🟢 正式狀態機鎖定：不排隊。槽位滿時直接略過，等待下一個新 Gate D 訊號；規則最單純，也最不容易產生延遲進場偏差。')
+            else:
+                st.success(f'🟢 正式狀態機候選：排隊最多 {qwin} 個交易日。下一版進入「實盤訂單生命週期 / 訊號去重 / 每日持倉帳本」驗證。')
+        else:
+            st.warning('🟡 排隊沒有形成足夠穩健優勢；正式規則維持「不排隊」，避免增加實盤複雜度。')
+
+        # 指定一組查看逐日權益與狀態事件
+        qsel=st.selectbox('查看哪一組排隊狀態機',options=[0,1,2,3],
+                          format_func=lambda x:'不排隊' if x==0 else f'最多排隊{x}個交易日',
+                          key='v3618_qsel')
+        eqs,lgs,aus,sts=packs18[qsel]
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('總報酬%',f"{sts['總報酬%']:.2f}")
+        c2.metric('真正MTM MDD%',f"{sts['真實MTM_MDD%']:.2f}")
+        c3.metric('淨PF',f"{sts['淨PF']:.2f}")
+        c4.metric('訊號承接率%',f"{sts['訊號承接率%']:.1f}")
+        if not eqs.empty:
+            st.line_chart(eqs.set_index('日期')[['MTM權益']])
+        with st.expander('🔎 查看狀態機事件明細'):
+            st.dataframe(aus.tail(1000),use_container_width=True,hide_index=True)
+
+        st.download_button('⬇️ 下載 V3.6.18 排隊PK',
+                           cmp18.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                           'V3.6.18_queue_PK.csv','text/csv',key='dl_v3618_pk')
+        st.download_button('⬇️ 下載 V3.6.18 年度穩定度',
+                           yr18.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                           'V3.6.18_queue_yearly.csv','text/csv',key='dl_v3618_year')
+        st.download_button('⬇️ 下載目前狀態機事件',
+                           aus.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                           f'V3.6.18_queue_{qsel}_audit.csv','text/csv',key='dl_v3618_audit')
+else:
+    st.info('請先完成 V3.6.15 真實 MTM 資料重建；V3.6.18 直接沿用相同 Gate D 交易與完整日K。')
