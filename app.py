@@ -13,6 +13,7 @@ except ModuleNotFoundError:
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from streamlit_autorefresh import st_autorefresh
+import json
 
 # ============================================================
 # 🖤 黑嚕嚕－台股盤中雷達 V3.6.12
@@ -8999,7 +9000,7 @@ def _v3624_json_default(x):
 def _v3624_save_state(state):
     try:
         with open(V3624_STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False, indent=2, default=_v3624_json_default)
+            _v3624_json.dump(state, f, ensure_ascii=False, indent=2, default=_v3624_json_default)
         return True, ''
     except Exception as e:
         return False, f'{type(e).__name__}: {e}'
@@ -9011,7 +9012,7 @@ def _v3624_load_state():
     try:
         if os.path.exists(V3624_STATE_FILE):
             with open(V3624_STATE_FILE, 'r', encoding='utf-8') as f:
-                state=json.load(f)
+                state=_v3624_json.load(f)
             if isinstance(state, dict) and state.get('version') == V3624_VERSION:
                 st.session_state['v3624_state']=state
                 return state
@@ -9326,11 +9327,22 @@ def _v3624_forward_status(m):
 
 
 st.divider()
-st.subheader('🧪 V3.6.24 Forward Test / Paper Trading｜從現在開始只驗證未來')
+st.subheader('🧪 V3.6.24.2 Forward Test / Paper Trading｜JSON Hard Fix')
+st.success('✅ Build：V3.6.24.2｜JSON 模組已載入｜Forward Hard Fix')
+
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
     '只有「先封存」的訊號才能在 N+1 開盤模擬成交，避免任何事後補訊號。'
 )
+
+import json as _v3624_json
+
+
+try:
+    _v3624_json.dumps({'ok': True})
+except Exception as _v3624_json_err:
+    st.error(f'V3.6.24.2 JSON 自檢失敗：{type(_v3624_json_err).__name__}: {_v3624_json_err}')
+    st.stop()
 
 state24=_v3624_load_state()
 
@@ -9339,7 +9351,7 @@ with st.expander('💾 Forward 帳本備份 / 還原（建議每次同步後下�
     up24=st.file_uploader('匯入 V3.6.24 JSON 帳本',type=['json'],key='v3624_upload')
     if up24 is not None and st.button('♻️ 還原這份 Forward 帳本',key='v3624_restore'):
         try:
-            imported=json.loads(up24.getvalue().decode('utf-8'))
+            imported=_v3624_json.loads(up24.getvalue().decode('utf-8'))
             if imported.get('version')!=V3624_VERSION:
                 st.error(f"版本不符：{imported.get('version')}，需要 {V3624_VERSION}")
             else:
@@ -9350,7 +9362,7 @@ with st.expander('💾 Forward 帳本備份 / 還原（建議每次同步後下�
         except Exception as e:
             st.error(f'帳本匯入失敗：{type(e).__name__}: {e}')
 
-    state_json=json.dumps(state24,ensure_ascii=False,indent=2,default=_v3624_json_default).encode('utf-8')
+    state_json=_v3624_json.dumps(state24,ensure_ascii=False,indent=2,default=_v3624_json_default).encode('utf-8')
     st.download_button(
         '⬇️ 下載 V3.6.24 Forward 完整帳本 JSON',
         state_json,
@@ -9519,7 +9531,7 @@ rules24=pd.DataFrame([
 st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
-    'V3.6.24 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
+    'V3.6.24.1 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
     '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
     '每次同步後下載 JSON 備份，避免 Streamlit Cloud 重啟造成帳本遺失。'
 )
