@@ -8920,3 +8920,606 @@ if 'packs22' in globals() and isinstance(packs22, dict) and '25檔 × 3.33%' in 
         st.warning('V3.6.23：每日 MTM 報酬樣本不足，無法進行 Monte Carlo。')
 else:
     st.info('請先完成 V3.6.22；V3.6.23 會沿用 25檔 × 3.33% 的 N+1開盤正式帳本。')
+
+
+
+# ============================================================
+# 🧪 V3.6.24 Forward Test / Paper Trading
+# 完全鎖定正式規則，不再回頭最佳化歷史：
+#   Gate D = 90~94 + 站上 MA200
+#   排序 = 分數 → 成交額 → 近 MA200
+#   成交 = 訊號日收盤後成立，N+1 開盤
+#   最大持股 = 25
+#   單筆目標資金 = 3.33%
+#   排隊 = 0（無槽位直接拒絕）
+#   出場 = 進場日起 D40 收盤 / 盤中硬停損 -12%
+#   成本 = 沿用 V3.6.23 畫面設定 fee / tax / slip
+#
+# 重要：
+# 1) 只有「先封存的訊號」才可在未來成交，禁止事後補造訊號。
+# 2) 忘記隔日開 App 沒關係：只要訊號已先封存，可用之後取得的歷史日K
+#    重建真正 N+1 開盤成交與後續持倉路徑。
+# 3) Streamlit Cloud 本機磁碟不是永久資料庫，所以同時提供 JSON 匯出/匯入。
+# ============================================================
+
+V3624_VERSION = 'V3.6.24'
+V3624_STATE_FILE = 'paper_state_v3624.json'
+V3624_INITIAL_CAPITAL = 1_000_000.0
+V3624_MAX_POS = 25
+V3624_POS_PCT = 3.33
+V3624_HOLD = 40
+V3624_HARD_STOP = 12.0
+
+# V3.6.23 / V3.6.21 已驗證基準，用來監控 Forward 是否逐步偏離。
+V3624_BACKTEST_CAGR = 49.1325
+V3624_BACKTEST_MDD = -19.9192
+V3624_BACKTEST_PF = 2.2044
+V3624_MC_P10_CAGR = 19.05
+V3624_MC_P10_MDD = -24.19
+V3624_MC_P10_CALMAR = 0.876
+V3624_MC_P10_PF = 1.6435
+
+def _v3624_empty_state():
+    return {
+        'version': V3624_VERSION,
+        'created_at': taiwan_time_text(),
+        'initial_capital': V3624_INITIAL_CAPITAL,
+        'cash': V3624_INITIAL_CAPITAL,
+        'positions': {},
+        'pending': [],
+        'signals': [],
+        'orders': [],
+        'fills': [],
+        'ledger': [],
+        'signal_keys': [],
+        'last_sync': '',
+        'locked_rules': {
+            'Gate': 'D｜90~94＋站上MA200',
+            'rank': '分數→成交額→近MA200',
+            'execution': 'N+1開盤',
+            'max_positions': V3624_MAX_POS,
+            'position_pct': V3624_POS_PCT,
+            'queue_days': 0,
+            'hold_days': V3624_HOLD,
+            'hard_stop_pct': V3624_HARD_STOP,
+        }
+    }
+
+def _v3624_json_default(x):
+    if isinstance(x, (pd.Timestamp, datetime)):
+        return pd.Timestamp(x).isoformat()
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return None if not np.isfinite(float(x)) else float(x)
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+    return str(x)
+
+def _v3624_save_state(state):
+    try:
+        with open(V3624_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, default=_v3624_json_default)
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+def _v3624_load_state():
+    # session_state 優先，避免每次 rerun 都重新讀檔
+    if 'v3624_state' in st.session_state and isinstance(st.session_state['v3624_state'], dict):
+        return st.session_state['v3624_state']
+    try:
+        if os.path.exists(V3624_STATE_FILE):
+            with open(V3624_STATE_FILE, 'r', encoding='utf-8') as f:
+                state=json.load(f)
+            if isinstance(state, dict) and state.get('version') == V3624_VERSION:
+                st.session_state['v3624_state']=state
+                return state
+    except Exception:
+        pass
+    state=_v3624_empty_state()
+    st.session_state['v3624_state']=state
+    return state
+
+def _v3624_commit(state):
+    state['last_sync']=taiwan_time_text()
+    st.session_state['v3624_state']=state
+    return _v3624_save_state(state)
+
+def _v3624_num(v, default=np.nan):
+    x=pd.to_numeric(v, errors='coerce')
+    return float(x) if pd.notna(x) and np.isfinite(float(x)) else default
+
+def _v3624_stock_df(symbol, market=''):
+    try:
+        d=get_stock_data(str(symbol).zfill(4), market or stock_market(symbol))
+        if d is None or d.empty:
+            return pd.DataFrame()
+        z=d.copy()
+        z.index=pd.DatetimeIndex(z.index).tz_localize(None).normalize()
+        return z[~z.index.duplicated(keep='last')].sort_index()
+    except Exception:
+        return pd.DataFrame()
+
+def _v3624_first_bar_after(df, signal_date):
+    if df is None or df.empty:
+        return None, None
+    s=pd.Timestamp(signal_date).normalize()
+    idx=pd.DatetimeIndex(df.index).normalize()
+    pos=np.where(idx>s)[0]
+    if len(pos)==0:
+        return None, None
+    i=int(pos[0])
+    return i, pd.Timestamp(idx[i]).normalize()
+
+def _v3624_price_on_or_before(df, dt, col='Close'):
+    if df is None or df.empty or col not in df.columns:
+        return np.nan
+    t=pd.Timestamp(dt).normalize()
+    z=df[pd.DatetimeIndex(df.index).normalize()<=t]
+    if z.empty:
+        return np.nan
+    return _v3624_num(z[col].iloc[-1])
+
+def _v3624_current_equity(state, asof=None):
+    asof=pd.Timestamp(asof or taiwan_now().date()).normalize()
+    mv=0.0
+    for sym,p in state.get('positions',{}).items():
+        d=_v3624_stock_df(sym,p.get('market',''))
+        px=_v3624_price_on_or_before(d,asof,'Close')
+        if not np.isfinite(px):
+            px=_v3624_num(p.get('last_px'), _v3624_num(p.get('entry_exec'),0))
+        p['last_px']=float(px)
+        mv += float(p.get('shares',0))*float(px)
+    return float(state.get('cash',0))+mv, mv
+
+def _v3624_process_open_positions(state, fee, tax, slip):
+    """只處理已成交部位；用已經發生的日K檢查 -12% 與 D40。"""
+    today=pd.Timestamp(taiwan_now().date()).normalize()
+    close_syms=[]
+    for sym,p in list(state.get('positions',{}).items()):
+        d=_v3624_stock_df(sym,p.get('market',''))
+        if d.empty:
+            continue
+        entry_date=pd.Timestamp(p['entry_date']).normalize()
+        idx=pd.DatetimeIndex(d.index).normalize()
+        loc=np.where(idx==entry_date)[0]
+        if len(loc)==0:
+            continue
+        i=int(loc[-1])
+        last_done=np.where(idx<=today)[0]
+        if len(last_done)==0:
+            continue
+        last_i=int(last_done[-1])
+        end=min(i+V3624_HOLD,last_i)
+        if end<i:
+            continue
+
+        stop_price=float(p['entry_raw'])*(1-V3624_HARD_STOP/100)
+        exit_i=None; exit_raw=None; reason=''
+        for j in range(i,end+1):
+            low=_v3624_num(d['Low'].iloc[j]) if 'Low' in d.columns else np.nan
+            op=_v3624_num(d['Open'].iloc[j]) if 'Open' in d.columns else np.nan
+            if np.isfinite(low) and low<=stop_price:
+                # 若隔日跳空低於停損價，以開盤價成交；否則以停損價成交。
+                exit_raw=min(stop_price,op) if np.isfinite(op) and op<stop_price else stop_price
+                exit_i=j
+                reason='硬停損12%'
+                break
+
+        if exit_i is None and last_i>=i+V3624_HOLD:
+            exit_i=i+V3624_HOLD
+            exit_raw=_v3624_num(d['Close'].iloc[exit_i])
+            reason='D40固定出場'
+
+        if exit_i is None or not np.isfinite(exit_raw):
+            p['last_px']=_v3624_num(d['Close'].iloc[last_i],p.get('last_px',p['entry_raw']))
+            continue
+
+        exit_date=pd.Timestamp(idx[exit_i]).normalize()
+        exit_exec=float(exit_raw)*(1-slip/100)
+        gross=float(p['shares'])*exit_exec
+        sell_cost=gross*((fee+tax)/100)
+        proceeds=gross-sell_cost
+        state['cash']=float(state.get('cash',0))+proceeds
+        pnl=proceeds-float(p['entry_total_cost'])
+        state['fills'].append({
+            '股票':sym,'名稱':p.get('name',''),'狀態':'CLOSED',
+            '訊號日':p['signal_date'],'進場日':p['entry_date'],
+            '出場日':exit_date.strftime('%Y-%m-%d'),
+            '技術分數':p.get('score',np.nan),
+            '進場價':p['entry_raw'],'出場價':float(exit_raw),
+            '股數':p['shares'],'投入成本':p['entry_total_cost'],
+            '賣出淨收入':proceeds,'淨損益':pnl,
+            '淨報酬%':pnl/float(p['entry_total_cost'])*100 if p['entry_total_cost'] else 0,
+            '出場原因':reason,'持有交易日':int(exit_i-i)
+        })
+        state['orders'].append({
+            '日期':exit_date.strftime('%Y-%m-%d'),'股票':sym,
+            '事件':'CLOSE','結果':'FILLED','原因':reason
+        })
+        close_syms.append(sym)
+
+    for sym in close_syms:
+        state['positions'].pop(sym,None)
+
+def _v3624_process_pending(state, fee, tax, slip):
+    """只成交「過去已封存」的訊號，成交價固定取下一交易日 Open。"""
+    remain=[]
+    # 固定正式排序；pending 在封存時已保存 rank_key，這裡仍重排一次。
+    pend=sorted(
+        state.get('pending',[]),
+        key=lambda r:(-float(r.get('score',0)),-float(r.get('liq',0)),float(r.get('dist',999999)))
+    )
+    for r in pend:
+        sym=str(r['symbol']).zfill(4)
+        d=_v3624_stock_df(sym,r.get('market',''))
+        i,entry_date=_v3624_first_bar_after(d,r['signal_date'])
+        if i is None:
+            remain.append(r)
+            continue
+
+        # 若同股仍持有，正式規則拒絕，不排隊。
+        if sym in state.get('positions',{}):
+            state['orders'].append({
+                '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+                '事件':'NEW_SIGNAL','結果':'REJECTED_DUPLICATE',
+                '原因':'同股仍在持有中'
+            })
+            continue
+
+        if len(state.get('positions',{}))>=V3624_MAX_POS:
+            state['orders'].append({
+                '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+                '事件':'NEW_SIGNAL','結果':'REJECTED_SLOT',
+                '原因':'25槽位已滿；正式規則 queue=0'
+            })
+            continue
+
+        entry_raw=_v3624_num(d['Open'].iloc[i]) if 'Open' in d.columns else np.nan
+        if not np.isfinite(entry_raw) or entry_raw<=0:
+            state['orders'].append({
+                '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+                '事件':'NEW_SIGNAL','結果':'REJECTED_BAD_PRICE',
+                '原因':'N+1開盤價無效'
+            })
+            continue
+
+        eq,_=_v3624_current_equity(state,entry_date)
+        target=eq*V3624_POS_PCT/100
+        entry_exec=entry_raw*(1+slip/100)
+        unit_cost=entry_exec*(1+fee/100)
+        alloc=min(target,float(state.get('cash',0)))
+        if alloc<=0 or alloc<target*0.20:
+            state['orders'].append({
+                '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+                '事件':'NEW_SIGNAL','結果':'REJECTED_CASH',
+                '原因':'可用現金不足'
+            })
+            continue
+
+        shares=alloc/unit_cost
+        total=shares*unit_cost
+        state['cash']=float(state.get('cash',0))-total
+        state.setdefault('positions',{})[sym]={
+            'symbol':sym,'name':r.get('name',''),'market':r.get('market',''),
+            'signal_date':r['signal_date'],'entry_date':entry_date.strftime('%Y-%m-%d'),
+            'entry_raw':entry_raw,'entry_exec':entry_exec,
+            'entry_total_cost':total,'shares':shares,
+            'score':r.get('score',np.nan),'last_px':entry_raw
+        }
+        state['orders'].append({
+            '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+            '事件':'NEW_SIGNAL','結果':'ACCEPTED_OPEN',
+            '原因':'Gate D / 正式排序 / N+1開盤 / 槽位 / 資金檢查'
+        })
+    state['pending']=remain
+
+def _v3624_append_ledger(state):
+    today=pd.Timestamp(taiwan_now().date()).normalize()
+    eq,mv=_v3624_current_equity(state,today)
+    row={
+        '日期':today.strftime('%Y-%m-%d'),
+        '現金':float(state.get('cash',0)),
+        '持倉市值':mv,'MTM權益':eq,
+        '持股檔數':len(state.get('positions',{})),
+        '可用槽位':V3624_MAX_POS-len(state.get('positions',{})),
+        '資金使用率%':mv/eq*100 if eq>0 else np.nan
+    }
+    led=[x for x in state.get('ledger',[]) if str(x.get('日期',''))!=row['日期']]
+    led.append(row)
+    state['ledger']=sorted(led,key=lambda x:x.get('日期',''))
+
+def _v3624_today_candidates(result_df):
+    """只有台灣交易日 13:30 後，且技術資料日=今天，才允許封存新訊號。"""
+    now=taiwan_now()
+    today=now.strftime('%Y-%m-%d')
+    if now.weekday()>=5:
+        return pd.DataFrame(), '今天是週末，不封存新訊號。'
+    if now.hour*60+now.minute<810:
+        return pd.DataFrame(), '尚未收盤；V3.6.24 必須等 13:30 後才封存 Gate D 訊號。'
+    c=_v3611_current_candidates(result_df)
+    if c is None or c.empty:
+        return pd.DataFrame(), '今日沒有 Gate D 候選。'
+    if '技術資料日' not in c.columns:
+        return pd.DataFrame(), '缺少「技術資料日」，為避免 Look-ahead / 舊資料誤封存，本日不記錄。'
+    dates=c['技術資料日'].astype(str).str[:10]
+    c=c[dates==today].copy()
+    if c.empty:
+        return pd.DataFrame(), f'目前技術資料尚未更新到 {today}，不封存舊訊號。'
+    return c, 'OK'
+
+def _v3624_seal_today_signals(state, result_df):
+    c,msg=_v3624_today_candidates(result_df)
+    if c.empty:
+        return 0,msg
+    today=taiwan_now().strftime('%Y-%m-%d')
+    keys=set(state.get('signal_keys',[]))
+    n=0
+    for _,r in c.iterrows():
+        sym=str(r.get('股票','')).zfill(4)
+        key=f'{today}|{sym}'
+        if key in keys:
+            continue
+        score=_v3624_num(r.get('黑嚕嚕分數',r.get('綜合分數',np.nan)),0)
+        liq=_v3624_num(r.get('估算成交額',0),0)
+        dist=abs(_v3624_num(r.get('距MA200%',999999),999999))
+        rec={
+            'signal_date':today,'symbol':sym,'name':str(r.get('名稱','')),
+            'market':str(r.get('市場','')),'score':score,'liq':liq,'dist':dist,
+            'signal_price':_v3624_num(r.get('價格',np.nan)),
+            'ma200':_v3624_num(r.get('MA200',np.nan)),
+            'sealed_at':taiwan_time_text()
+        }
+        state.setdefault('signals',[]).append(rec)
+        state.setdefault('pending',[]).append(rec.copy())
+        keys.add(key); n+=1
+    state['signal_keys']=sorted(keys)
+    return n,f'已封存 {n} 筆今日 Gate D 訊號。'
+
+def _v3624_metrics(state):
+    led=pd.DataFrame(state.get('ledger',[]))
+    fills=pd.DataFrame(state.get('fills',[]))
+    initial=float(state.get('initial_capital',V3624_INITIAL_CAPITAL))
+    out={
+        '天數':0,'總報酬%':np.nan,'CAGR%':np.nan,'MDD%':np.nan,'Calmar':np.nan,
+        'PF':np.nan,'勝率%':np.nan,'完成交易':0,'目前持股':len(state.get('positions',{}))
+    }
+    if not led.empty and 'MTM權益' in led.columns:
+        led['日期']=pd.to_datetime(led['日期'],errors='coerce')
+        led['MTM權益']=pd.to_numeric(led['MTM權益'],errors='coerce')
+        led=led.dropna(subset=['日期','MTM權益']).sort_values('日期')
+        if not led.empty:
+            eq=led['MTM權益'].astype(float)
+            out['天數']=max((led['日期'].iloc[-1]-led['日期'].iloc[0]).days,0)
+            out['總報酬%']=(eq.iloc[-1]/initial-1)*100
+            peak=eq.cummax()
+            dd=(eq/peak-1)*100
+            out['MDD%']=float(dd.min())
+            if out['天數']>=30 and eq.iloc[-1]>0:
+                years=max(out['天數']/365.25,1/365.25)
+                out['CAGR%']=(eq.iloc[-1]/initial)**(1/years)*100-100
+                out['Calmar']=out['CAGR%']/abs(out['MDD%']) if out['MDD%']<0 else np.nan
+    if not fills.empty and '淨損益' in fills.columns:
+        pnl=pd.to_numeric(fills['淨損益'],errors='coerce').dropna()
+        out['完成交易']=len(pnl)
+        if len(pnl):
+            out['勝率%']=(pnl>0).mean()*100
+            gp=pnl[pnl>0].sum(); gl=-pnl[pnl<0].sum()
+            out['PF']=gp/gl if gl>0 else np.inf
+    return out
+
+def _v3624_forward_status(m):
+    """早期樣本不夠時只做監控，不做策略生死判決。"""
+    n=int(m.get('完成交易',0) or 0)
+    days=int(m.get('天數',0) or 0)
+    if n<30 or days<60:
+        return '⚪ 累積期','至少累積 60 日且 30 筆完成交易後，再開始做 Forward 偏離判定。'
+    pf=m.get('PF',np.nan); mdd=m.get('MDD%',np.nan)
+    if (pd.notna(pf) and pf<1.0) or (pd.notna(mdd) and mdd<=-35):
+        return '🔴 異常','已進入嚴格異常區：PF<1 或 MDD≤-35%。先停止加碼並檢查資料/執行/市場結構，不自動改參數。'
+    if (pd.notna(pf) and pf<1.5) or (pd.notna(mdd) and mdd<=-30):
+        return '🟠 警戒','已落入壓力區：PF<1.5 或 MDD≤-30%。保留策略參數，增加觀察。'
+    if pd.notna(mdd) and mdd<=-25:
+        return '🟡 注意','MDD 已低於 -25%，但仍未到 -30% 嚴格警戒線。'
+    return '🟢 正常','Forward 尚未出現超出目前 Monte Carlo 壓力範圍的明顯異常。'
+
+
+st.divider()
+st.subheader('🧪 V3.6.24 Forward Test / Paper Trading｜從現在開始只驗證未來')
+st.caption(
+    'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
+    '只有「先封存」的訊號才能在 N+1 開盤模擬成交，避免任何事後補訊號。'
+)
+
+state24=_v3624_load_state()
+
+# 匯入 / 匯出與帳本初始化
+with st.expander('💾 Forward 帳本備份 / 還原（建議每次同步後下載一份）', expanded=False):
+    up24=st.file_uploader('匯入 V3.6.24 JSON 帳本',type=['json'],key='v3624_upload')
+    if up24 is not None and st.button('♻️ 還原這份 Forward 帳本',key='v3624_restore'):
+        try:
+            imported=json.loads(up24.getvalue().decode('utf-8'))
+            if imported.get('version')!=V3624_VERSION:
+                st.error(f"版本不符：{imported.get('version')}，需要 {V3624_VERSION}")
+            else:
+                st.session_state['v3624_state']=imported
+                _v3624_save_state(imported)
+                st.success('Forward 帳本已還原。')
+                st.rerun()
+        except Exception as e:
+            st.error(f'帳本匯入失敗：{type(e).__name__}: {e}')
+
+    state_json=json.dumps(state24,ensure_ascii=False,indent=2,default=_v3624_json_default).encode('utf-8')
+    st.download_button(
+        '⬇️ 下載 V3.6.24 Forward 完整帳本 JSON',
+        state_json,
+        'V3.6.24_forward_state.json',
+        'application/json',
+        key='v3624_download_state'
+    )
+
+    if st.button('🧨 清空 Forward 帳本重新開始',key='v3624_reset'):
+        st.session_state['v3624_state']=_v3624_empty_state()
+        _v3624_save_state(st.session_state['v3624_state'])
+        st.success('已建立全新的 Forward 帳本；歷史回測參數沒有變動。')
+        st.rerun()
+
+# 沿用前面畫面的成本設定；若變數不存在才使用正式預設值
+fee24=float(globals().get('fee',0.1425))
+tax24=float(globals().get('tax',0.30))
+slip24=float(globals().get('slip',0.10))
+
+c1,c2,c3,c4=st.columns(4)
+c1.metric('正式最大持股','25 檔')
+c2.metric('單筆目標資金','3.33%')
+c3.metric('成交假設','N+1 開盤')
+c4.metric('出場規則','D40 / -12%')
+
+cand24,msg24=_v3624_today_candidates(result if 'result' in globals() else pd.DataFrame())
+if msg24=='OK':
+    st.success(f'今日可封存 Gate D 訊號：{len(cand24)} 筆。封存後內容即固定，不會因之後價格變動回寫。')
+    show24=[c for c in ['股票','名稱','黑嚕嚕分數','價格','MA200','距MA200%','估算成交額','技術資料日'] if c in cand24.columns]
+    if show24:
+        st.dataframe(cand24[show24],use_container_width=True,hide_index=True)
+else:
+    st.info(msg24)
+
+b1,b2=st.columns(2)
+if b1.button('🔒 封存今日 Gate D 訊號',key='v3624_seal',use_container_width=True):
+    n24,txt24=_v3624_seal_today_signals(state24,result if 'result' in globals() else pd.DataFrame())
+    _v3624_commit(state24)
+    if n24>0: st.success(txt24)
+    else: st.warning(txt24)
+    st.rerun()
+
+if b2.button('🔄 同步 Forward 帳本 / N+1成交 / MTM',key='v3624_sync',use_container_width=True):
+    # 順序固定：先處理舊持倉出場，再處理先前已封存 pending 訊號，再做今日 MTM。
+    _v3624_process_open_positions(state24,fee24,tax24,slip24)
+    _v3624_process_pending(state24,fee24,tax24,slip24)
+    _v3624_append_ledger(state24)
+    ok24,err24=_v3624_commit(state24)
+    if ok24: st.success('Forward 帳本同步完成。')
+    else: st.warning(f'帳本已在本次工作階段更新，但本機 JSON 儲存失敗：{err24}')
+    st.rerun()
+
+m24=_v3624_metrics(state24)
+status24,status_text24=_v3624_forward_status(m24)
+
+st.markdown('### 📒 55 Forward 即時帳本')
+a,b,c,d,e,f=st.columns(6)
+a.metric('已封存訊號',len(state24.get('signals',[])))
+b.metric('待 N+1 成交',len(state24.get('pending',[])))
+c.metric('目前持股',len(state24.get('positions',{})))
+d.metric('完成交易',m24['完成交易'])
+e.metric('現金',f"{float(state24.get('cash',0)):,.0f}")
+eq24,_mv24=_v3624_current_equity(state24)
+f.metric('目前 MTM 權益',f'{eq24:,.0f}')
+
+st.caption(
+    f"帳本建立：{state24.get('created_at','')}｜最後同步：{state24.get('last_sync','尚未同步')}｜"
+    f"成本：手續費 {fee24:g}% / 賣出稅 {tax24:g}% / 單邊滑價 {slip24:g}%"
+)
+
+st.markdown('### 📊 56 Forward 績效 vs 歷史 / Monte Carlo')
+cmp24=pd.DataFrame([
+    {'基準':'歷史正式回測','CAGR%':V3624_BACKTEST_CAGR,'MDD%':V3624_BACKTEST_MDD,'PF':V3624_BACKTEST_PF},
+    {'基準':'Monte Carlo P10','CAGR%':V3624_MC_P10_CAGR,'MDD%':V3624_MC_P10_MDD,'PF':V3624_MC_P10_PF},
+    {'基準':'Forward 實際','CAGR%':m24['CAGR%'],'MDD%':m24['MDD%'],'PF':m24['PF']},
+])
+st.dataframe(cmp24,use_container_width=True,hide_index=True)
+
+x1,x2,x3,x4,x5=st.columns(5)
+x1.metric('Forward 總報酬%',f"{m24['總報酬%']:.2f}" if pd.notna(m24['總報酬%']) else '-')
+x2.metric('Forward CAGR%',f"{m24['CAGR%']:.2f}" if pd.notna(m24['CAGR%']) else '樣本累積中')
+x3.metric('Forward MDD%',f"{m24['MDD%']:.2f}" if pd.notna(m24['MDD%']) else '-')
+x4.metric('Forward PF',f"{m24['PF']:.2f}" if pd.notna(m24['PF']) and np.isfinite(m24['PF']) else '-')
+x5.metric('Forward 勝率%',f"{m24['勝率%']:.1f}" if pd.notna(m24['勝率%']) else '-')
+
+if status24.startswith('🟢'):
+    st.success(f'{status24}｜{status_text24}')
+elif status24.startswith('⚪'):
+    st.info(f'{status24}｜{status_text24}')
+elif status24.startswith('🟡') or status24.startswith('🟠'):
+    st.warning(f'{status24}｜{status_text24}')
+else:
+    st.error(f'{status24}｜{status_text24}')
+
+st.markdown('### 🧾 57 Forward 訂單生命週期')
+od24=pd.DataFrame(state24.get('orders',[]))
+if od24.empty:
+    st.info('目前尚無 Forward 訂單事件。先在交易日收盤後封存 Gate D 訊號。')
+else:
+    st.dataframe(od24.tail(300).iloc[::-1],use_container_width=True,hide_index=True)
+    st.download_button(
+        '⬇️ 下載 Forward 訂單事件 CSV',
+        od24.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+        'V3.6.24_forward_orders.csv','text/csv',key='v3624_dl_orders'
+    )
+
+st.markdown('### 💼 58 Forward 持股 / 已完成交易')
+pos_rows=[]
+for sym,p in state24.get('positions',{}).items():
+    d=_v3624_stock_df(sym,p.get('market',''))
+    px=_v3624_price_on_or_before(d,taiwan_now().date(),'Close')
+    if not np.isfinite(px): px=_v3624_num(p.get('last_px'),p.get('entry_raw',np.nan))
+    mv=float(p.get('shares',0))*px if np.isfinite(px) else np.nan
+    pnl=mv-float(p.get('entry_total_cost',0)) if np.isfinite(mv) else np.nan
+    pos_rows.append({
+        '股票':sym,'名稱':p.get('name',''),'訊號日':p.get('signal_date',''),
+        'N+1進場日':p.get('entry_date',''),'技術分數':p.get('score',np.nan),
+        '進場價':p.get('entry_raw',np.nan),'最新收盤':px,
+        '投入成本':p.get('entry_total_cost',np.nan),'持倉市值':mv,
+        '未實現損益':pnl,
+        '未實現報酬%':pnl/float(p.get('entry_total_cost',1))*100 if pd.notna(pnl) and p.get('entry_total_cost',0) else np.nan
+    })
+pos24=pd.DataFrame(pos_rows)
+if not pos24.empty:
+    st.dataframe(pos24,use_container_width=True,hide_index=True)
+else:
+    st.caption('目前無持股。')
+
+fl24=pd.DataFrame(state24.get('fills',[]))
+if not fl24.empty:
+    with st.expander('查看已完成 Forward 交易',expanded=False):
+        st.dataframe(fl24.iloc[::-1],use_container_width=True,hide_index=True)
+        st.download_button(
+            '⬇️ 下載 Forward 完成交易 CSV',
+            fl24.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.24_forward_fills.csv','text/csv',key='v3624_dl_fills'
+        )
+
+st.markdown('### 📈 59 Forward 每日 MTM 權益')
+led24=pd.DataFrame(state24.get('ledger',[]))
+if not led24.empty:
+    led24['日期']=pd.to_datetime(led24['日期'],errors='coerce')
+    led24=led24.dropna(subset=['日期']).sort_values('日期')
+    st.line_chart(led24.set_index('日期')[['MTM權益']])
+    st.dataframe(led24.tail(120).iloc[::-1],use_container_width=True,hide_index=True)
+    st.download_button(
+        '⬇️ 下載 Forward 每日 MTM CSV',
+        led24.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+        'V3.6.24_forward_daily_mtm.csv','text/csv',key='v3624_dl_mtm'
+    )
+else:
+    st.info('按一次「同步 Forward 帳本」後開始建立每日 MTM 序列。')
+
+st.markdown('### 🧠 60 V3.6.24 前瞻驗證規則')
+rules24=pd.DataFrame([
+    {'項目':'策略參數','鎖定值':'Gate D｜90~94＋站上MA200','用途':'禁止 Forward 期間重新挑 Gate'},
+    {'項目':'排序','鎖定值':'分數→成交額→近MA200','用途':'同日訊號固定優先順序'},
+    {'項目':'成交','鎖定值':'訊號封存後 N+1 開盤','用途':'消除訊號日收盤 Look-ahead'},
+    {'項目':'容量','鎖定值':'25檔 × 3.33%','用途':'沿用 V3.6.22 穩健平台'},
+    {'項目':'排隊','鎖定值':'0交易日','用途':'槽位滿即拒絕，不事後補單'},
+    {'項目':'出場','鎖定值':'D40 / 盤中硬停損12%','用途':'沿用正式歷史規則'},
+    {'項目':'早期觀察期','鎖定值':'至少60日＋30筆完成交易','用途':'樣本不足時不因短期輸贏改策略'},
+    {'項目':'警戒','鎖定值':'PF<1.5 或 MDD≤-30%','用途':'進入壓力觀察，不自動調參'},
+    {'項目':'嚴格異常','鎖定值':'PF<1 或 MDD≤-35%','用途':'停止加碼並檢查資料/執行/市場結構'},
+])
+st.dataframe(rules24,use_container_width=True,hide_index=True)
+
+st.success(
+    'V3.6.24 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
+    '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
+    '每次同步後下載 JSON 備份，避免 Streamlit Cloud 重啟造成帳本遺失。'
+)
