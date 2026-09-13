@@ -6751,3 +6751,130 @@ if not mtm_trades16.empty and mtm_prices16:
         st.download_button('⬇️ 下載 V3.6.16 回撤事件',dd16.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.16_drawdowns.csv','text/csv',key='dl_v3616_dd')
 else:
     st.info('請先在上方執行 V3.6.15 真實 MTM 驗證；完成後 V3.6.16 會直接沿用同一批完整日K，不需要再下載一次。')
+
+# ============================================================
+# 🏁 V3.6.17 Gate D 訊號排序 / 25槽位競爭驗證
+# Gate D 與 25檔×3.33% 完全鎖定；只比較「同日訊號超過可用槽位時」的排序規則。
+# 不新增篩選門檻，避免重新資料探勘。
+# ============================================================
+
+def _v3617_ranked_trades(trades, mode='分數→成交額→近MA200'):
+    if trades is None or trades.empty:
+        return pd.DataFrame()
+    z=trades.copy()
+    z['技術分數']=pd.to_numeric(z.get('技術分數'),errors='coerce')
+    z['_liq']=pd.to_numeric(z.get('估算成交額',np.nan),errors='coerce').fillna(0)
+    z['_vr']=pd.to_numeric(z.get('量比',np.nan),errors='coerce').fillna(0)
+    px=pd.to_numeric(z.get('進場價',np.nan),errors='coerce')
+    ma=pd.to_numeric(z.get('MA200',np.nan),errors='coerce')
+    z['_dist']=((px/ma)-1).abs().replace([np.inf,-np.inf],np.nan).fillna(999)
+    if mode=='分數→成交額→近MA200':
+        cols=['進場日','技術分數','_liq','_dist']; asc=[True,False,False,True]
+    elif mode=='分數→近MA200→成交額':
+        cols=['進場日','技術分數','_dist','_liq']; asc=[True,False,True,False]
+    elif mode=='分數→量比→成交額':
+        cols=['進場日','技術分數','_vr','_liq']; asc=[True,False,False,False]
+    elif mode=='成交額→分數→近MA200':
+        cols=['進場日','_liq','技術分數','_dist']; asc=[True,False,False,True]
+    else: # 純分數：股票代號只作 deterministic tie-break，不代表投資偏好
+        z['_sym']=z['股票'].astype(str)
+        cols=['進場日','技術分數','_sym']; asc=[True,False,True]
+    return z.sort_values(cols,ascending=asc).reset_index(drop=True)
+
+
+def _v3617_mtm(trades,price_map,initial_capital,rank_mode,fee_pct,tax_pct,slippage_pct):
+    ranked=_v3617_ranked_trades(trades,rank_mode)
+    # _v3615_true_mtm 會再依「進場日、技術分數」排序；為保留同分排序，
+    # 加入極小且不改 Gate 區間的排序尾碼，只影響同分訊號的先後，不影響交易條件。
+    if ranked.empty:return pd.DataFrame(),pd.DataFrame(),{}
+    ranked=ranked.copy()
+    ranked['_day_order']=ranked.groupby('進場日').cumcount()
+    base_score=pd.to_numeric(ranked['技術分數'],errors='coerce').fillna(0)
+    ranked['技術分數原值']=base_score
+    ranked['技術分數']=base_score-ranked['_day_order']*1e-7
+    eq,lg,stt=_v3615_true_mtm(ranked,price_map,initial_capital,25,3.33,fee_pct,tax_pct,slippage_pct)
+    if stt: stt['排序規則']=rank_mode
+    return eq,lg,stt
+
+
+def _v3617_compare(trades,prices,capital,fee,tax,slip):
+    modes=['純分數','分數→成交額→近MA200','分數→近MA200→成交額','分數→量比→成交額','成交額→分數→近MA200']
+    rows=[]; packs={}
+    for mode in modes:
+        eq,lg,stt=_v3617_mtm(trades,prices,capital,mode,fee,tax,slip)
+        if not stt:continue
+        row={'排序規則':mode,'總報酬%':stt['總報酬%'],'CAGR%':stt['CAGR%'],'MTM_MDD%':stt['真實MTM_MDD%'],
+             'Calmar':stt['Calmar'],'淨PF':stt['淨PF'],'淨勝率%':stt['淨勝率%'],'完成交易':stt['完成交易'],
+             '訊號承接率%':stt['訊號承接率%'],'槽位不足淘汰':stt['槽位不足淘汰'],'資金不足淘汰':stt['資金不足淘汰']}
+        rows.append(row);packs[mode]=(eq,lg,stt)
+    return pd.DataFrame(rows),packs
+
+
+def _v3617_year_compare(packs):
+    rows=[]
+    for mode,(eq,lg,stt) in packs.items():
+        y=_v3616_yearly(eq,lg)
+        if y.empty:continue
+        for _,r in y.iterrows():
+            rows.append({'排序規則':mode,'年度':int(r['年度']),'年度報酬%':r['年度報酬%'],'年度MDD%':r['年度MDD%'],
+                         '淨PF':r['淨PF'],'淨勝率%':r['淨勝率%'],'完成交易':r['完成交易']})
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('🏁 V3.6.17 訊號排序 / 25槽位競爭驗證')
+st.caption('V3.6.16 五項全數通過後，Gate D＝90~94＋站上MA200、25檔×3.33% 正式鎖定。本版不改進場條件，只回答：同一天候選太多時，25個槽位應優先給誰。')
+
+tr17=st.session_state.get('v3615_trades',pd.DataFrame())
+px17=st.session_state.get('v3615_prices',{})
+if not tr17.empty and px17:
+    cmp17,packs17=_v3617_compare(tr17,px17,capital,fee,tax,slip)
+    if not cmp17.empty:
+        # 以純分數為中性基準，所有改善均顯示而不偷換基準
+        b=cmp17[cmp17['排序規則']=='純分數'].iloc[0]
+        cmp17['CAGR改善ppt']=cmp17['CAGR%']-float(b['CAGR%'])
+        cmp17['MDD改善ppt']=cmp17['MTM_MDD%']-float(b['MTM_MDD%'])
+        cmp17['PF改善']=cmp17['淨PF']-float(b['淨PF'])
+        cmp17['Calmar改善']=cmp17['Calmar']-float(b['Calmar'])
+        st.markdown('### 🏆 ⑳ 五種槽位排序規則 PK')
+        st.dataframe(cmp17.round(4),use_container_width=True,hide_index=True)
+
+        yr17=_v3617_year_compare(packs17)
+        st.markdown('### 📅 ㉑ 排序規則年度穩定度')
+        st.dataframe(yr17.round(4),use_container_width=True,hide_index=True)
+
+        # 穩健排名：不只看總報酬；要求至少2/3年度報酬為正，再看 Calmar/PF/CAGR。
+        rank=[]
+        for _,r in cmp17.iterrows():
+            mode=r['排序規則']; yy=yr17[yr17['排序規則']==mode]
+            pos_ratio=float((yy['年度報酬%']>0).mean()) if len(yy) else 0
+            rank.append({'排序規則':mode,'正報酬年度比例%':pos_ratio*100,'Calmar':r['Calmar'],'淨PF':r['淨PF'],
+                         'CAGR%':r['CAGR%'],'MTM_MDD%':r['MTM_MDD%'],'完成交易':r['完成交易'],
+                         '年度穩定通過':pos_ratio>=2/3})
+        rank=pd.DataFrame(rank).sort_values(['年度穩定通過','Calmar','淨PF','CAGR%'],ascending=[False,False,False,False]).reset_index(drop=True)
+        st.markdown('### 🧠 ㉒ V3.6.17 穩健排序')
+        st.dataframe(rank.round(4),use_container_width=True,hide_index=True)
+        winner=rank.iloc[0]
+        wmode=winner['排序規則']; wr=cmp17[cmp17['排序規則']==wmode].iloc[0]
+
+        # 正式採用門檻：相對純分數不能以更深超過2ppt的MDD換取報酬，且PF不得惡化。
+        robust=bool(winner['年度穩定通過'])
+        pf_nonworse=float(wr['淨PF'])>=float(b['淨PF'])-0.03
+        mdd_nonworse=float(wr['MTM_MDD%'])>=float(b['MTM_MDD%'])-2.0
+        calmar_nonworse=float(wr['Calmar'])>=float(b['Calmar'])
+        checks17=pd.DataFrame([
+            {'驗證':'至少2/3年度正報酬','結果':f"{winner['正報酬年度比例%']:.1f}%",'通過':robust},
+            {'驗證':'淨PF不明顯劣於純分數','結果':f"{wr['淨PF']:.2f} vs {b['淨PF']:.2f}",'通過':pf_nonworse},
+            {'驗證':'MDD不得比純分數惡化超過2ppt','結果':f"{wr['MTM_MDD%']:.2f}% vs {b['MTM_MDD%']:.2f}%",'通過':mdd_nonworse},
+            {'驗證':'Calmar不低於純分數','結果':f"{wr['Calmar']:.2f} vs {b['Calmar']:.2f}",'通過':calmar_nonworse},
+        ])
+        st.markdown('### 🧾 ㉓ V3.6.17 自動判定')
+        st.dataframe(checks17,use_container_width=True,hide_index=True)
+        if bool(checks17['通過'].all()):
+            st.success(f"🟢 排序規則可鎖定：{wmode}。下一版直接進入『訊號排隊 / 槽位釋放 / 實盤執行狀態機』。")
+        else:
+            st.warning('🟡 排序規則沒有形成足夠穩健優勢；正式執行先保留「純分數」中性排序，避免為了歷史報酬過度最佳化。下一版仍可進實盤狀態機。')
+
+        st.download_button('⬇️ 下載 V3.6.17 排序PK',cmp17.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.17_ranking_PK.csv','text/csv',key='dl_v3617_pk')
+        st.download_button('⬇️ 下載 V3.6.17 年度穩定度',yr17.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.17_ranking_yearly.csv','text/csv',key='dl_v3617_year')
+else:
+    st.info('請先完成上方 V3.6.15 真實 MTM 資料重建；V3.6.17 會直接沿用同一批 Gate D 交易與日K。')
