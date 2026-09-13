@@ -8974,6 +8974,10 @@ def _v3624_empty_state():
         'ledger': [],
         'signal_keys': [],
         'last_sync': '',
+        # V3.6.25.2：雲端帳本修訂號。每次成功寫入 Drive +1。
+        # 用來偵測其他瀏覽器/舊分頁是否先更新過，避免舊資料覆蓋新資料。
+        'cloud_revision': 0,
+        'cloud_last_saved_at': '',
         'locked_rules': {
             'Gate': 'D｜90~94＋站上MA200',
             'rank': '分數→成交額→近MA200',
@@ -9006,49 +9010,103 @@ def _v3624_save_state(state):
         return False, f'{type(e).__name__}: {e}'
 
 def _v3624_load_state():
+    """
+    V3.6.25.2 啟動規則：
+    1) 同一瀏覽器 session 內先沿用記憶體。
+    2) 新 session / Streamlit 重啟：只要 OAuth 已設定，優先讀 Google Drive。
+    3) Drive 暫時讀不到時，可以用 local cache 顯示，但「雲端寫入鎖定」，
+       避免空白/舊 cache 反向覆蓋 Drive。
+    """
     if 'v3624_state' in st.session_state and isinstance(st.session_state['v3624_state'], dict):
         return st.session_state['v3624_state']
 
-    # OAuth 設定完成後，優先從 Google Drive 還原。
-    try:
-        if '_v36251_oauth_configured' in globals() and _v36251_oauth_configured():
-            ds,msg=_v36251_drive_download_state()
-            if isinstance(ds,dict):
-                st.session_state['v3624_state']=ds
-                _v3624_save_state(ds)
-                st.session_state['v36251_drive_status']={'ok':True,'message':msg}
-                return ds
-    except Exception:
-        pass
+    oauth_ready = bool(
+        '_v36251_oauth_configured' in globals()
+        and _v36251_oauth_configured()
+    )
 
+    if oauth_ready:
+        try:
+            ds, msg = _v36251_drive_download_state()
+            if isinstance(ds, dict):
+                ds['version'] = 'V3.6.25.2'
+                ds['cloud_revision'] = int(pd.to_numeric(ds.get('cloud_revision', 0), errors='coerce') or 0)
+                st.session_state['v3624_state'] = ds
+                st.session_state['v36252_cloud_ready'] = True
+                st.session_state['v36252_base_revision'] = int(ds.get('cloud_revision', 0))
+                _v3624_save_state(ds)
+                st.session_state['v36251_drive_status'] = {'ok': True, 'message': msg}
+                return ds
+
+            # OAuth 可用但 Drive 沒讀到正式帳本 / 讀取失敗：
+            # 保守起見，禁止直接把 fallback state 寫回 Drive。
+            st.session_state['v36252_cloud_ready'] = False
+            st.session_state['v36251_drive_status'] = {
+                'ok': False,
+                'message': f'雲端尚未確認，已啟用防覆寫保護｜{msg}'
+            }
+        except Exception as e:
+            st.session_state['v36252_cloud_ready'] = False
+            st.session_state['v36251_drive_status'] = {
+                'ok': False,
+                'message': f'雲端讀取失敗，已啟用防覆寫保護｜{type(e).__name__}: {e}'
+            }
+
+    # local cache 只作備援顯示；OAuth 已設定但雲端未確認時，不允許自動回寫。
     try:
         if os.path.exists(V3624_STATE_FILE):
             with open(V3624_STATE_FILE, 'r', encoding='utf-8') as f:
-                state=_v3624_json.load(f)
+                state = _v3624_json.load(f)
             if isinstance(state, dict):
-                state['version']='V3.6.25.1'
-                st.session_state['v3624_state']=state
+                state['version'] = 'V3.6.25.2'
+                state.setdefault('cloud_revision', 0)
+                state.setdefault('cloud_last_saved_at', '')
+                st.session_state['v3624_state'] = state
                 return state
     except Exception:
         pass
-    state=_v3624_empty_state()
-    state['version']='V3.6.25.1'
-    st.session_state['v3624_state']=state
+
+    state = _v3624_empty_state()
+    state['version'] = 'V3.6.25.2'
+    st.session_state['v3624_state'] = state
+    if not oauth_ready:
+        st.session_state['v36252_cloud_ready'] = False
     return state
 
+
 def _v3624_commit(state):
-    state['last_sync']=taiwan_time_text()
-    state['version']='V3.6.25.1'
-    st.session_state['v3624_state']=state
+    """
+    所有 Forward 狀態異動都先存 local cache，再嘗試安全寫入 Drive。
+    Google Drive 是正式帳本；如果雲端基準未確認，拒絕覆寫。
+    """
+    state['last_sync'] = taiwan_time_text()
+    state['version'] = 'V3.6.25.2'
+    state.setdefault('cloud_revision', 0)
+    state.setdefault('cloud_last_saved_at', '')
+    st.session_state['v3624_state'] = state
+
     local_ok, local_err = _v3624_save_state(state)
+
     try:
         if '_v36251_oauth_configured' in globals() and _v36251_oauth_configured():
-            _v36251_drive_upload_state(state)
+            if not st.session_state.get('v36252_cloud_ready', False):
+                st.session_state['v36251_drive_status'] = {
+                    'ok': False,
+                    'message': (
+                        '🛡️ 已阻擋雲端覆寫：本次啟動尚未成功讀取 Google Drive 正式帳本。'
+                        '請先按「從 Drive 還原帳本」或「測試 OAuth / Drive」，確認雲端後再同步。'
+                    )
+                }
+            else:
+                _v36251_drive_upload_state(state, safe_check=True)
     except Exception as e:
-        st.session_state['v36251_drive_status']={
-            'ok':False,'message':f'{type(e).__name__}: {e}'
+        st.session_state['v36251_drive_status'] = {
+            'ok': False,
+            'message': f'{type(e).__name__}: {e}'
         }
+
     return local_ok, local_err
+
 
 def _v3624_num(v, default=np.nan):
     x=pd.to_numeric(v, errors='coerce')
@@ -9351,7 +9409,7 @@ def _v3624_forward_status(m):
 
 
 # ============================================================
-# ☁️ V3.6.25.1 Google Drive OAuth 永久 Forward 帳本
+# ☁️ V3.6.25.2 Google Drive OAuth 永久 Forward 帳本
 # 不使用 Service Account 金鑰，改用「使用者 OAuth + refresh token」。
 # Scope：drive.file（最小權限，只管理本 App 建立/使用的 Drive 檔案）
 #
@@ -9363,12 +9421,12 @@ def _v3624_forward_status(m):
 # refresh_token = "..."
 # token_uri = "https://oauth2.googleapis.com/token"
 # folder_name = "黑嚕嚕_Forward帳本"
-# state_filename = "V3.6.25.1_forward_state.json"
+# state_filename = "V3.6.25.2_forward_state.json"
 # ============================================================
 
 V36251_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
 V36251_FOLDER_NAME = '黑嚕嚕_Forward帳本'
-V36251_STATE_FILENAME = 'V3.6.25.1_forward_state.json'
+V36251_STATE_FILENAME = 'V3.6.25.2_forward_state.json'
 
 def _v36251_oauth_cfg():
     try:
@@ -9441,78 +9499,220 @@ def _v36251_get_or_create_folder(service, cfg):
         fields='id,name,mimeType,modifiedTime'
     ).execute()
 
-def _v36251_drive_upload_state(state):
+def _v36252_state_revision(state):
+    try:
+        x = pd.to_numeric((state or {}).get('cloud_revision', 0), errors='coerce')
+        return int(x) if pd.notna(x) else 0
+    except Exception:
+        return 0
+
+
+def _v36252_read_file_json(service, file_id):
+    content = service.files().get_media(fileId=file_id).execute()
+    if isinstance(content, bytes):
+        raw = content.decode('utf-8')
+    else:
+        raw = bytes(content).decode('utf-8')
+    obj = _v3624_json.loads(raw)
+    return obj if isinstance(obj, dict) else None
+
+
+def _v36252_backup_folder(service, parent_id):
+    mime = 'application/vnd.google-apps.folder'
+    f = _v36251_find(service, '_backup', mime_type=mime, parent_id=parent_id)
+    if f:
+        return f
+    return service.files().create(
+        body={'name': '_backup', 'mimeType': mime, 'parents': [parent_id]},
+        fields='id,name,mimeType,modifiedTime'
+    ).execute()
+
+
+def _v36252_backup_remote(service, cfg, folder, current):
+    """
+    更新正式 JSON 前先備份「上一版」。
+    最多保留最近 30 份，避免 Drive 無限制累積。
+    """
+    try:
+        if not current:
+            return
+        backup_dir = _v36252_backup_folder(service, folder['id'])
+        stamp = pd.Timestamp.now(tz='Asia/Taipei').strftime('%Y%m%d_%H%M%S')
+        base = cfg['state_filename'].rsplit('.json', 1)[0]
+        backup_name = f'{base}_backup_{stamp}.json'
+        service.files().copy(
+            fileId=current['id'],
+            body={'name': backup_name, 'parents': [backup_dir['id']]},
+            fields='id,name,modifiedTime'
+        ).execute()
+
+        resp = service.files().list(
+            q=f"'{backup_dir['id']}' in parents and trashed = false",
+            spaces='drive',
+            fields='files(id,name,modifiedTime)',
+            pageSize=100
+        ).execute()
+        files = sorted(
+            resp.get('files', []),
+            key=lambda x: x.get('modifiedTime', ''),
+            reverse=True
+        )
+        for old in files[30:]:
+            try:
+                service.files().delete(fileId=old['id']).execute()
+            except Exception:
+                pass
+    except Exception:
+        # 備份失敗不應把正式帳本本身弄壞；正式寫入仍有 revision 防衝突。
+        pass
+
+
+def _v36251_drive_upload_state(state, safe_check=True):
     import io
     try:
-        service,cfg=_v36251_drive_service()
-        folder=_v36251_get_or_create_folder(service,cfg)
-        payload=_v3624_json.dumps(
+        service, cfg = _v36251_drive_service()
+        folder = _v36251_get_or_create_folder(service, cfg)
+        current = _v36251_find(service, cfg['state_filename'], parent_id=folder['id'])
+
+        base_rev = int(st.session_state.get('v36252_base_revision', 0) or 0)
+        remote_rev = 0
+        remote_state = None
+
+        if current:
+            remote_state = _v36252_read_file_json(service, current['id'])
+            remote_rev = _v36252_state_revision(remote_state)
+
+        # 樂觀鎖：雲端 revision 必須等於本 session 最後讀到/寫到的 revision。
+        # 若有人在別的分頁或另一台電腦先寫過，直接拒絕覆蓋。
+        if safe_check and current and remote_rev != base_rev:
+            msg = (
+                f'🛡️ 防覆寫保護：雲端帳本已更新（雲端 revision={remote_rev}，'
+                f'本頁基準 revision={base_rev}）。'
+                '本頁不會覆蓋較新的資料，請先按「從 Drive 還原帳本」。'
+            )
+            st.session_state['v36252_cloud_ready'] = False
+            st.session_state['v36251_drive_status'] = {'ok': False, 'message': msg}
+            return False, msg
+
+        next_rev = remote_rev + 1 if current else max(base_rev, _v36252_state_revision(state)) + 1
+        state['cloud_revision'] = int(next_rev)
+        state['cloud_last_saved_at'] = taiwan_time_text()
+        state['version'] = 'V3.6.25.2'
+
+        payload = _v3624_json.dumps(
             state, ensure_ascii=False, indent=2,
             default=_v3624_json_default
         ).encode('utf-8')
-        from googleapiclient.http import MediaIoBaseUpload
-        media=MediaIoBaseUpload(io.BytesIO(payload),mimetype='application/json',resumable=False)
 
-        current=_v36251_find(service,cfg['state_filename'],parent_id=folder['id'])
+        from googleapiclient.http import MediaIoBaseUpload
+        media = MediaIoBaseUpload(
+            io.BytesIO(payload),
+            mimetype='application/json',
+            resumable=False
+        )
+
         if current:
-            saved=service.files().update(
+            # 先把「上一版」正式檔存成備份，再更新 current。
+            _v36252_backup_remote(service, cfg, folder, current)
+            saved = service.files().update(
                 fileId=current['id'],
                 media_body=media,
                 fields='id,name,modifiedTime,size'
             ).execute()
-            action='更新'
+            action = '安全更新'
         else:
-            saved=service.files().create(
+            saved = service.files().create(
                 body={
-                    'name':cfg['state_filename'],
-                    'parents':[folder['id']],
-                    'mimeType':'application/json'
+                    'name': cfg['state_filename'],
+                    'parents': [folder['id']],
+                    'mimeType': 'application/json'
                 },
                 media_body=media,
                 fields='id,name,modifiedTime,size'
             ).execute()
-            action='建立'
-        msg=f"Drive {action}成功｜{cfg['folder_name']}/{saved.get('name')}｜{saved.get('modifiedTime','')}"
-        st.session_state['v36251_drive_status']={'ok':True,'message':msg}
-        return True,msg
+            action = '建立'
+
+        st.session_state['v36252_base_revision'] = int(next_rev)
+        st.session_state['v36252_cloud_ready'] = True
+        st.session_state['v3624_state'] = state
+        _v3624_save_state(state)
+
+        msg = (
+            f"Drive {action}成功｜revision {next_rev}｜"
+            f"{cfg['folder_name']}/{saved.get('name')}｜{saved.get('modifiedTime','')}"
+        )
+        st.session_state['v36251_drive_status'] = {'ok': True, 'message': msg}
+        return True, msg
+
     except Exception as e:
-        msg=f'{type(e).__name__}: {e}'
-        st.session_state['v36251_drive_status']={'ok':False,'message':msg}
-        return False,msg
+        msg = f'{type(e).__name__}: {e}'
+        st.session_state['v36251_drive_status'] = {'ok': False, 'message': msg}
+        return False, msg
+
 
 def _v36251_drive_download_state():
     try:
-        service,cfg=_v36251_drive_service()
-        folder=_v36251_get_or_create_folder(service,cfg)
-        current=_v36251_find(service,cfg['state_filename'],parent_id=folder['id'])
+        service, cfg = _v36251_drive_service()
+        folder = _v36251_get_or_create_folder(service, cfg)
+        current = _v36251_find(service, cfg['state_filename'], parent_id=folder['id'])
         if not current:
-            return None,'Drive 尚未有 Forward 帳本'
-        content=service.files().get_media(fileId=current['id']).execute()
-        if isinstance(content,bytes):
-            state=_v3624_json.loads(content.decode('utf-8'))
-        else:
-            state=_v3624_json.loads(bytes(content).decode('utf-8'))
-        if not isinstance(state,dict):
-            return None,'Drive JSON 格式錯誤'
-        state['version']='V3.6.25.1'
-        return state,f"Drive 讀取成功｜{cfg['folder_name']}/{current.get('name')}｜{current.get('modifiedTime','')}"
+            # 尚未有正式雲端帳本：允許建立第一版。
+            st.session_state['v36252_base_revision'] = 0
+            st.session_state['v36252_cloud_ready'] = True
+            return None, 'Drive 尚未有 Forward 帳本，可建立第一版'
+
+        state = _v36252_read_file_json(service, current['id'])
+        if not isinstance(state, dict):
+            st.session_state['v36252_cloud_ready'] = False
+            return None, 'Drive JSON 格式錯誤'
+
+        state['version'] = 'V3.6.25.2'
+        state.setdefault('cloud_revision', 0)
+        state.setdefault('cloud_last_saved_at', '')
+        rev = _v36252_state_revision(state)
+
+        st.session_state['v36252_base_revision'] = rev
+        st.session_state['v36252_cloud_ready'] = True
+
+        return state, (
+            f"Drive 讀取成功｜revision {rev}｜"
+            f"{cfg['folder_name']}/{current.get('name')}｜{current.get('modifiedTime','')}"
+        )
     except Exception as e:
-        return None,f'{type(e).__name__}: {e}'
+        st.session_state['v36252_cloud_ready'] = False
+        return None, f'{type(e).__name__}: {e}'
+
 
 def _v36251_drive_test():
     try:
-        service,cfg=_v36251_drive_service()
-        folder=_v36251_get_or_create_folder(service,cfg)
-        current=_v36251_find(service,cfg['state_filename'],parent_id=folder['id'])
-        tail='尚未建立 Forward JSON' if not current else f"已存在 {current.get('name')}｜{current.get('modifiedTime','')}"
-        return True,f"OAuth 正常｜資料夾：{folder.get('name')}｜{tail}"
+        service, cfg = _v36251_drive_service()
+        folder = _v36251_get_or_create_folder(service, cfg)
+        current = _v36251_find(service, cfg['state_filename'], parent_id=folder['id'])
+
+        if current:
+            remote_state = _v36252_read_file_json(service, current['id'])
+            rev = _v36252_state_revision(remote_state)
+            st.session_state['v36252_base_revision'] = rev
+            st.session_state['v36252_cloud_ready'] = True
+            tail = (
+                f"已存在 {current.get('name')}｜revision {rev}｜"
+                f"{current.get('modifiedTime','')}"
+            )
+        else:
+            st.session_state['v36252_base_revision'] = 0
+            st.session_state['v36252_cloud_ready'] = True
+            tail = '尚未建立 Forward JSON，可建立第一版'
+
+        return True, f"OAuth 正常｜資料夾：{folder.get('name')}｜{tail}"
     except Exception as e:
-        return False,f'{type(e).__name__}: {e}'
+        st.session_state['v36252_cloud_ready'] = False
+        return False, f'{type(e).__name__}: {e}'
+
 
 
 st.divider()
-st.subheader('☁️ V3.6.25.1 Forward Test / Paper Trading｜Google Drive OAuth 永久帳本')
-st.success('✅ Build：V3.6.25.1｜OAuth 永久帳本｜不使用 Service Account 金鑰')
+st.subheader('☁️ V3.6.25.2 Forward Test / Paper Trading｜Google Drive 防覆寫安全帳本')
+st.success('✅ Build：V3.6.25.2｜Drive 自動還原＋Revision 防覆寫＋最近30版雲端備份')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -9537,6 +9737,24 @@ o1.metric('OAuth設定','已完成' if _v36251_oauth_configured() else '尚未�
 o2.metric('Drive資料夾',cfg251['folder_name'])
 o3.metric('雲端檔名',cfg251['state_filename'])
 
+safe_ready = bool(st.session_state.get('v36252_cloud_ready', False))
+base_rev = int(st.session_state.get('v36252_base_revision', 0) or 0)
+s1,s2,s3=st.columns(3)
+s1.metric('雲端讀取狀態','✅ 已確認' if safe_ready else '🛡️ 寫入鎖定')
+s2.metric('目前基準 revision',base_rev)
+s3.metric('自動啟動還原','✅ Drive 優先')
+
+if safe_ready:
+    st.caption(
+        '✅ 新瀏覽器 Session / Streamlit 重啟時會自動優先讀取 Drive，不需要每天手動按還原。'
+        '每次更新前會檢查 revision；若雲端已有較新版本，本頁會拒絕覆蓋。'
+    )
+else:
+    st.warning(
+        '🛡️ 防覆寫模式：目前尚未成功確認 Drive 正式帳本，因此自動雲端寫入已鎖定。'
+        '可先按「從 Drive 還原帳本」重新取得最新雲端版本。'
+    )
+
 last251=st.session_state.get('v36251_drive_status',{})
 if last251:
     if last251.get('ok'):
@@ -9551,7 +9769,7 @@ if oo1.button('🔌 測試 OAuth / Drive',key='v36251_test',use_container_width=
     else: st.error(msg)
 
 if oo2.button('☁️ 立即備份目前帳本',key='v36251_upload',use_container_width=True):
-    ok,msg=_v36251_drive_upload_state(state24)
+    ok,msg=_v36251_drive_upload_state(state24, safe_check=True)
     if ok: st.success(msg)
     else: st.error(msg)
 
@@ -9559,6 +9777,8 @@ if oo3.button('♻️ 從 Drive 還原帳本',key='v36251_restore',use_container
     ds,msg=_v36251_drive_download_state()
     if isinstance(ds,dict):
         st.session_state['v3624_state']=ds
+        st.session_state['v36252_cloud_ready']=True
+        st.session_state['v36252_base_revision']=_v36252_state_revision(ds)
         _v3624_save_state(ds)
         st.success(msg)
         st.rerun()
@@ -9570,6 +9790,12 @@ if not _v36251_oauth_configured():
         '尚未設定 Google Drive OAuth。完成 client_id、client_secret、refresh_token 後，'
         'App 會自動建立「黑嚕嚕_Forward帳本」資料夾與 JSON，不需要手動分享給 Service Account。'
     )
+
+st.info(
+    '📌 正式 JSON 是「整本帳本的最新完整快照」，不是只存今天一天。'
+    '今天新增的 signals / orders / fills / ledger 會保留在同一份歷史資料中；'
+    'V3.6.25.2 在每次更新正式檔前，還會把上一版放進 Drive 的 `_backup` 資料夾，最多保留最近 30 版。'
+)
 
 # 匯入 / 匯出與帳本初始化
 with st.expander('💾 Forward 帳本備份 / 還原（建議每次同步後下載一份）', expanded=False):
@@ -9741,7 +9967,7 @@ if not led24.empty:
 else:
     st.info('按一次「同步 Forward 帳本」後開始建立每日 MTM 序列。')
 
-st.markdown('### 🧠 60 V3.6.25.1 前瞻驗證規則')
+st.markdown('### 🧠 60 V3.6.25.2 前瞻驗證規則')
 rules24=pd.DataFrame([
     {'項目':'策略參數','鎖定值':'Gate D｜90~94＋站上MA200','用途':'禁止 Forward 期間重新挑 Gate'},
     {'項目':'排序','鎖定值':'分數→成交額→近MA200','用途':'同日訊號固定優先順序'},
@@ -9756,7 +9982,7 @@ rules24=pd.DataFrame([
 st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
-    'V3.6.25.1 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
+    'V3.6.25.2 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
     '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
     'OAuth 設定完成後，每次封存與同步會自動備份到 Google Drive；手動 JSON 下載仍保留作第二層備援。'
 )
