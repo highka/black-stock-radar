@@ -8593,3 +8593,330 @@ if 'next_open' in globals() and isinstance(next_open, pd.DataFrame) and not next
         )
 else:
     st.info('請先完成 V3.6.21；V3.6.22 會直接沿用已重建完成的 N+1 開盤 Gate D 訊號。')
+
+
+# ============================================================
+# 🎲 V3.6.23 Monte Carlo / Trade Sequence Robustness
+# 正式規則完全鎖定：
+# Gate D / N+1開盤 / 分數→成交額→近MA200 / queue=0 / 25檔 / 3.33%
+#
+# 本版不再最佳化任何參數，只回答：
+# 1) 如果歷史報酬的出現順序改變，MDD/CAGR 還撐得住嗎？
+# 2) 若遇到比較倒楣的報酬排列，虧損機率多高？
+# 3) 目前漂亮的 PF / CAGR 是否高度依賴少數交易順序？
+# ============================================================
+
+def _v3623_daily_returns_from_ledger(ledger):
+    if ledger is None or ledger.empty or 'MTM權益' not in ledger.columns:
+        return pd.Series(dtype=float)
+    z = ledger.sort_values('日期').copy()
+    r = pd.to_numeric(z['MTM權益'], errors='coerce').pct_change()
+    r = r.replace([np.inf, -np.inf], np.nan).dropna()
+    return r.astype(float)
+
+def _v3623_block_bootstrap_returns(ret, n_paths=3000, block=20, seed=3623):
+    """Moving-block bootstrap daily portfolio returns.
+    相較完全打散單日報酬，block bootstrap 能保留一部分趨勢/震盪連續性。
+    """
+    r = np.asarray(ret, dtype=float)
+    n = len(r)
+    if n < 10:
+        return None
+    block = int(max(1, min(block, n)))
+    rng = np.random.default_rng(int(seed))
+    max_start = max(1, n - block + 1)
+    out = np.empty((int(n_paths), n), dtype=float)
+
+    for i in range(int(n_paths)):
+        parts = []
+        need = n
+        while need > 0:
+            s = int(rng.integers(0, max_start))
+            piece = r[s:s+block]
+            if len(piece) == 0:
+                piece = r
+            take = min(need, len(piece))
+            parts.append(piece[:take])
+            need -= take
+        out[i, :] = np.concatenate(parts)[:n]
+    return out
+
+def _v3623_path_metrics(paths, trading_days=252):
+    """由模擬日報酬矩陣計算 CAGR / MDD / Calmar / 總報酬。"""
+    if paths is None or len(paths) == 0:
+        return pd.DataFrame()
+    # 防止極端 bootstrap 造成 1+r <= 0
+    p = np.clip(np.asarray(paths, dtype=float), -0.999, None)
+    equity = np.cumprod(1.0 + p, axis=1)
+    final = equity[:, -1]
+    years = max(p.shape[1] / float(trading_days), 1/float(trading_days))
+    cagr = (np.power(final, 1.0/years) - 1.0) * 100.0
+    peaks = np.maximum.accumulate(equity, axis=1)
+    dd = (equity / peaks - 1.0) * 100.0
+    mdd = np.min(dd, axis=1)
+    total_ret = (final - 1.0) * 100.0
+    calmar = np.where(np.abs(mdd) > 1e-12, cagr / np.abs(mdd), np.nan)
+    return pd.DataFrame({
+        '總報酬%': total_ret,
+        'CAGR%': cagr,
+        'MTM_MDD%': mdd,
+        'Calmar': calmar
+    })
+
+def _v3623_trade_bootstrap(fills, n_paths=3000, seed=3624):
+    """封閉交易 bootstrap：主要觀察 PF / 勝率 / 平均交易報酬穩定度。
+    此處不拿來代替逐日 MDD；MDD 仍以每日 MTM block bootstrap 為主。
+    """
+    if fills is None or fills.empty or '淨報酬%' not in fills.columns:
+        return pd.DataFrame()
+    rr = pd.to_numeric(fills['淨報酬%'], errors='coerce').replace([np.inf,-np.inf],np.nan).dropna().to_numpy(float)
+    if len(rr) < 20:
+        return pd.DataFrame()
+    rng = np.random.default_rng(int(seed))
+    n = len(rr)
+    rows = []
+    for _ in range(int(n_paths)):
+        s = rng.choice(rr, size=n, replace=True)
+        wins = s[s > 0]
+        losses = s[s < 0]
+        gp = float(wins.sum()) if len(wins) else 0.0
+        gl = float(-losses.sum()) if len(losses) else 0.0
+        pf = gp/gl if gl > 0 else (np.inf if gp > 0 else 0.0)
+        rows.append({
+            '淨PF': pf,
+            '勝率%': float((s > 0).mean()*100),
+            '平均交易報酬%': float(np.mean(s)),
+            '中位交易報酬%': float(np.median(s))
+        })
+    return pd.DataFrame(rows)
+
+def _v3623_quantile_table(df, cols):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rows = []
+    for c in cols:
+        s = pd.to_numeric(df[c], errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
+        if s.empty:
+            continue
+        rows.append({
+            '指標': c,
+            'P05': s.quantile(.05),
+            'P10': s.quantile(.10),
+            'P25': s.quantile(.25),
+            'P50': s.quantile(.50),
+            'P75': s.quantile(.75),
+            'P90': s.quantile(.90),
+            'P95': s.quantile(.95),
+            '平均': s.mean()
+        })
+    return pd.DataFrame(rows)
+
+def _v3623_risk_probabilities(path_df, trade_df):
+    if path_df is None or path_df.empty:
+        return pd.DataFrame()
+    rows = [
+        {'風險事件':'總報酬 < 0','機率%':float((path_df['總報酬%']<0).mean()*100)},
+        {'風險事件':'CAGR < 0','機率%':float((path_df['CAGR%']<0).mean()*100)},
+        {'風險事件':'MDD ≤ -20%','機率%':float((path_df['MTM_MDD%']<=-20).mean()*100)},
+        {'風險事件':'MDD ≤ -25%','機率%':float((path_df['MTM_MDD%']<=-25).mean()*100)},
+        {'風險事件':'MDD ≤ -30%','機率%':float((path_df['MTM_MDD%']<=-30).mean()*100)},
+        {'風險事件':'MDD ≤ -35%','機率%':float((path_df['MTM_MDD%']<=-35).mean()*100)},
+        {'風險事件':'Calmar < 1','機率%':float((path_df['Calmar']<1).mean()*100)},
+        {'風險事件':'Calmar < 1.5','機率%':float((path_df['Calmar']<1.5).mean()*100)},
+    ]
+    if trade_df is not None and not trade_df.empty:
+        rows.extend([
+            {'風險事件':'Trade Bootstrap PF < 1','機率%':float((trade_df['淨PF']<1).mean()*100)},
+            {'風險事件':'Trade Bootstrap PF < 1.5','機率%':float((trade_df['淨PF']<1.5).mean()*100)},
+        ])
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('🎲 V3.6.23 Monte Carlo｜正式策略隨機壓力測試')
+st.caption(
+    'V3.6.22 已鎖定 25檔 × 3.33%，V3.6.21 已鎖定 N+1 開盤成交。'
+    '本版完全不改 Gate D、不改排序、不改資金配置；只把已實現的每日 MTM 報酬用 Moving-Block Bootstrap 重抽，'
+    '並另外對封閉交易做 Bootstrap，觀察倒楣順序下的 CAGR、MDD、Calmar、PF 分布。'
+)
+
+if 'packs22' in globals() and isinstance(packs22, dict) and '25檔 × 3.33%' in packs22:
+    led23, od23, fl23, pos23, st23 = packs22['25檔 × 3.33%']
+
+    c1, c2, c3 = st.columns(3)
+    sims23 = c1.select_slider(
+        'Monte Carlo 模擬次數',
+        options=[1000, 3000, 5000, 10000],
+        value=3000,
+        key='v3623_sims'
+    )
+    block23 = c2.select_slider(
+        'Moving Block 長度（交易日）',
+        options=[5, 10, 20, 40],
+        value=20,
+        key='v3623_block'
+    )
+    seed23 = c3.number_input(
+        '隨機種子',
+        min_value=1, max_value=999999,
+        value=3623, step=1,
+        key='v3623_seed'
+    )
+
+    daily_ret23 = _v3623_daily_returns_from_ledger(led23)
+
+    if len(daily_ret23) >= 10:
+        paths23 = _v3623_block_bootstrap_returns(
+            daily_ret23,
+            n_paths=int(sims23),
+            block=int(block23),
+            seed=int(seed23)
+        )
+        mc23 = _v3623_path_metrics(paths23)
+        trade_mc23 = _v3623_trade_bootstrap(
+            fl23,
+            n_paths=int(sims23),
+            seed=int(seed23)+1
+        )
+
+        # 實際正式策略數值
+        actual23 = _v3620_period_stats(led23, fl23, capital)
+
+        st.markdown('### 🏆 ㊾ Monte Carlo 分位數｜Daily MTM Block Bootstrap')
+        q23 = _v3623_quantile_table(
+            mc23, ['總報酬%','CAGR%','MTM_MDD%','Calmar']
+        )
+        st.dataframe(q23.round(4), use_container_width=True, hide_index=True)
+
+        a1,a2,a3,a4 = st.columns(4)
+        a1.metric('正式 CAGR%', f"{actual23.get('CAGR%',np.nan):.2f}")
+        a2.metric('MC P10 CAGR%', f"{mc23['CAGR%'].quantile(.10):.2f}")
+        a3.metric('正式 MTM MDD%', f"{actual23.get('MTM_MDD%',np.nan):.2f}")
+        a4.metric('MC P10 MDD%', f"{mc23['MTM_MDD%'].quantile(.10):.2f}")
+
+        st.markdown('### 🧪 ㊿ Trade Bootstrap｜PF / 勝率穩定度')
+        tq23 = _v3623_quantile_table(
+            trade_mc23, ['淨PF','勝率%','平均交易報酬%','中位交易報酬%']
+        )
+        st.dataframe(tq23.round(4), use_container_width=True, hide_index=True)
+
+        st.markdown('### ⚠️ 51 極端風險機率')
+        rp23 = _v3623_risk_probabilities(mc23, trade_mc23)
+        st.dataframe(rp23.round(4), use_container_width=True, hide_index=True)
+
+        # 實際值在 MC 分布中的百分位
+        def pct_rank(series, value, higher_better=True):
+            s = pd.to_numeric(series, errors='coerce').dropna()
+            if s.empty or not np.isfinite(value):
+                return np.nan
+            if higher_better:
+                return float((s <= value).mean()*100)
+            return float((s >= value).mean()*100)
+
+        actual_cagr = float(actual23.get('CAGR%', np.nan))
+        actual_mdd = float(actual23.get('MTM_MDD%', np.nan))
+        actual_cal = float(actual23.get('Calmar', np.nan))
+        actual_pf = float(actual23.get('淨PF', np.nan))
+
+        percentiles23 = pd.DataFrame([
+            {'指標':'CAGR','正式值':actual_cagr,'正式值所在百分位%':pct_rank(mc23['CAGR%'],actual_cagr,True)},
+            {'指標':'MTM MDD','正式值':actual_mdd,'正式值所在百分位%':pct_rank(mc23['MTM_MDD%'],actual_mdd,True)},
+            {'指標':'Calmar','正式值':actual_cal,'正式值所在百分位%':pct_rank(mc23['Calmar'],actual_cal,True)},
+            {'指標':'淨PF','正式值':actual_pf,'正式值所在百分位%':pct_rank(trade_mc23['淨PF'],actual_pf,True) if not trade_mc23.empty else np.nan},
+        ])
+        st.markdown('### 📍 52 正式績效在 Monte Carlo 分布的位置')
+        st.dataframe(percentiles23.round(4), use_container_width=True, hide_index=True)
+
+        # 正式判定：用保守 P10 / tail risk，不用平均值。
+        p10_cagr = float(mc23['CAGR%'].quantile(.10))
+        p10_mdd = float(mc23['MTM_MDD%'].quantile(.10))
+        p10_cal = float(mc23['Calmar'].quantile(.10))
+        p10_pf = float(trade_mc23['淨PF'].quantile(.10)) if not trade_mc23.empty else np.nan
+        loss_prob = float((mc23['CAGR%']<0).mean()*100)
+        mdd30_prob = float((mc23['MTM_MDD%']<=-30).mean()*100)
+
+        checks23 = pd.DataFrame([
+            {
+                '驗證':'MC P10 CAGR > 0',
+                '結果':f'{p10_cagr:.2f}%',
+                '通過':p10_cagr > 0
+            },
+            {
+                '驗證':'MC P10 MDD ≥ -35%',
+                '結果':f'{p10_mdd:.2f}%',
+                '通過':p10_mdd >= -35
+            },
+            {
+                '驗證':'MC P10 Calmar ≥ 0.80',
+                '結果':f'{p10_cal:.2f}',
+                '通過':p10_cal >= 0.80
+            },
+            {
+                '驗證':'Trade Bootstrap P10 PF ≥ 1.20',
+                '結果':f'{p10_pf:.2f}' if np.isfinite(p10_pf) else 'NA',
+                '通過':bool(np.isfinite(p10_pf) and p10_pf >= 1.20)
+            },
+            {
+                '驗證':'模擬 CAGR < 0 機率 ≤ 10%',
+                '結果':f'{loss_prob:.2f}%',
+                '通過':loss_prob <= 10
+            },
+            {
+                '驗證':'模擬 MDD ≤ -30% 機率 ≤ 25%',
+                '結果':f'{mdd30_prob:.2f}%',
+                '通過':mdd30_prob <= 25
+            },
+        ])
+
+        st.markdown('### 🧠 53 V3.6.23 Monte Carlo 正式判定')
+        st.dataframe(checks23, use_container_width=True, hide_index=True)
+
+        if bool(checks23['通過'].all()):
+            st.success(
+                '🟢 V3.6.23 通過：25檔 × 3.33% 的正式策略在報酬順序被打亂、'
+                '又保留部分時間連續性的 Monte Carlo 壓力下仍維持正期望。'
+                '下一階段可以進入 Paper Trading / Forward Test 設計，不再回頭最佳化歷史參數。'
+            )
+        else:
+            st.warning(
+                '🟡 V3.6.23 有尾端風險條件未通過。此處不回頭調 Gate D 或3.33%；'
+                '應先看是 MDD 尾部太厚、PF不穩，還是少數極端路徑拖累。'
+            )
+
+        # 簡單分布圖：只顯示 CAGR 與 MDD，避免過多圖表
+        dist23 = pd.DataFrame({
+            'CAGR%': mc23['CAGR%'],
+            'MTM_MDD%': mc23['MTM_MDD%']
+        })
+        st.markdown('### 📊 54 Monte Carlo 分布')
+        hist_choice23 = st.radio(
+            '查看分布',
+            ['CAGR%','MTM_MDD%'],
+            horizontal=True,
+            key='v3623_hist_choice'
+        )
+        st.bar_chart(
+            np.histogram(
+                dist23[hist_choice23].replace([np.inf,-np.inf],np.nan).dropna(),
+                bins=40
+            )[0]
+        )
+
+        st.download_button(
+            '⬇️ 下載 V3.6.23 Monte Carlo 路徑統計',
+            mc23.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.23_monte_carlo_paths.csv',
+            'text/csv',
+            key='dl_v3623_mc'
+        )
+        if not trade_mc23.empty:
+            st.download_button(
+                '⬇️ 下載 V3.6.23 Trade Bootstrap',
+                trade_mc23.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.23_trade_bootstrap.csv',
+                'text/csv',
+                key='dl_v3623_trade'
+            )
+    else:
+        st.warning('V3.6.23：每日 MTM 報酬樣本不足，無法進行 Monte Carlo。')
+else:
+    st.info('請先完成 V3.6.22；V3.6.23 會沿用 25檔 × 3.33% 的 N+1開盤正式帳本。')
