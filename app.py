@@ -5887,7 +5887,7 @@ def _v3611_locked_validation(events,min_sample=50):
         'events':events,'gate_events':gate
     }
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.26｜正式 Forward 精簡版｜即時優先＋盤後備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28｜Forward 健康檢查＋Fail-Closed｜即時優先＋盤後備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -6396,7 +6396,7 @@ def _v3615_candidate_grid(trades,price_map,capital,fee,tax,slip):
 
 
 # ============================================================
-# 📊 V3.6.27 Forward 實戰儀表板版
+# 🛡️ V3.6.28 Forward 每日健康檢查 / Fail-Closed 版
 # 已完成並封存的歷史研究介面（V3.6.14 ~ V3.6.23）不再於正式 App 顯示或執行。
 # 正式參數維持鎖定：Gate D 90~94 + MA200 / N+1 Open / 25 x 3.33% / queue=0 / D40 / -12% hard stop。
 # ============================================================
@@ -6808,6 +6808,140 @@ def _v3624_today_candidates(result_df):
     if c.empty:
         return pd.DataFrame(), f'目前技術資料尚未更新到 {today}，不封存舊訊號。'
     return c, 'OK'
+
+
+# ============================================================
+# 🛡️ V3.6.28 每日健康檢查 / Fail-Closed
+# 原則：
+# - 休市日 / 收盤前：資料未到今日不算故障，標示為中性。
+# - 交易日收盤後：技術資料日不是今天 => 阻擋「封存今日 Gate D」。
+# - Drive 未確認 / revision 衝突 / 帳本結構異常 => 阻擋任何正式帳本寫入。
+# - 只做健康保護，不修改 Gate D、排序、N+1、25×3.33%、D40/-12%。
+# ============================================================
+
+def _v3628_expected_rules_ok(state):
+    r=(state or {}).get('locked_rules',{}) or {}
+    tests=[
+        str(r.get('Gate',''))=='D｜90~94＋站上MA200',
+        str(r.get('rank',''))=='分數→成交額→近MA200',
+        str(r.get('execution',''))=='N+1開盤',
+        int(pd.to_numeric(r.get('max_positions',-1),errors='coerce') or -1)==V3624_MAX_POS,
+        abs(float(pd.to_numeric(r.get('position_pct',-1),errors='coerce') or -1)-V3624_POS_PCT)<1e-9,
+        int(pd.to_numeric(r.get('queue_days',-1),errors='coerce') or -1)==0,
+        int(pd.to_numeric(r.get('hold_days',-1),errors='coerce') or -1)==V3624_HOLD,
+        abs(float(pd.to_numeric(r.get('hard_stop_pct',-1),errors='coerce') or -1)-V3624_HARD_STOP)<1e-9,
+    ]
+    return all(tests)
+
+def _v3628_health_snapshot(state, result_df):
+    now=taiwan_now(); today=now.strftime('%Y-%m-%d')
+    is_weekend=now.weekday()>=5
+    after_close=(not is_weekend) and (now.hour*60+now.minute>=810)
+    rows=[]
+    seal_block=[]; sync_block=[]
+
+    def add(name,status,detail,critical=False,scope=''):
+        rows.append({'檢查項目':name,'狀態':status,'說明':detail,'關鍵保護':'是' if critical else '否'})
+        if critical and status.startswith('🔴'):
+            if scope in ('seal','both'): seal_block.append(f'{name}：{detail}')
+            if scope in ('sync','both'): sync_block.append(f'{name}：{detail}')
+
+    # 1) 交易日 / 行情日期
+    if is_weekend:
+        add('交易日與技術資料日','⚪ 休市日','週末不要求技術資料更新到今天；不封存新訊號。')
+    elif not after_close:
+        add('交易日與技術資料日','⚪ 收盤前','13:30 前不封存 Gate D；今日技術日K尚未完成屬正常。')
+    else:
+        if result_df is None or result_df.empty or '技術資料日' not in result_df.columns:
+            add('交易日與技術資料日','🔴 異常','收盤後缺少有效技術資料日，禁止封存。',True,'seal')
+        else:
+            ds=set(result_df['技術資料日'].dropna().astype(str).str[:10])
+            if today in ds:
+                add('交易日與技術資料日','🟢 正常',f'收盤後技術資料已更新到 {today}。',True,'seal')
+            else:
+                latest=max(ds) if ds else '未知'
+                add('交易日與技術資料日','🔴 異常',f'預期 {today}，目前最新 {latest}；禁止封存舊訊號。',True,'seal')
+
+    # 2) 官方全市場股票池完整性（寬鬆下限，只抓明顯斷線/縮水）
+    vc=UNIVERSE['市場'].value_counts().to_dict() if UNIVERSE is not None and not UNIVERSE.empty else {}
+    lu,otc,esb=int(vc.get('上市',0)),int(vc.get('上櫃',0)),int(vc.get('興櫃',0))
+    uok=(lu>=900 and otc>=700 and esb>=100 and len(UNIVERSE)>=1800)
+    add('全市場股票池','🟢 正常' if uok else '🔴 異常',
+        f'上市 {lu}｜上櫃 {otc}｜興櫃 {esb}｜合計 {len(UNIVERSE) if UNIVERSE is not None else 0}',
+        not uok,'seal' if not uok else '')
+
+    # 3) 雷達結果管線
+    nres=0 if result_df is None else len(result_df)
+    if nres>0:
+        add('雷達技術掃描','🟢 正常',f'本次產生 {nres} 筆符合目前畫面篩選條件的結果。')
+    else:
+        add('雷達技術掃描','🟡 注意','目前結果為空；若是條件過嚴不代表系統故障。')
+
+    # 4) OAuth / Drive 已設定且本 session 已確認雲端正式帳本
+    oauth_ok=bool(_v36251_oauth_configured())
+    cloud_ok=bool(st.session_state.get('v36252_cloud_ready',False))
+    if oauth_ok and cloud_ok:
+        add('Google Drive 正式帳本','🟢 正常','OAuth 已設定，且本 Session 已成功確認 Drive 正式帳本。',True,'both')
+    else:
+        add('Google Drive 正式帳本','🔴 寫入鎖定',
+            'OAuth 未完成或本 Session 尚未成功讀取 Drive；禁止正式帳本寫入。',True,'both')
+
+    # 5) revision 樂觀鎖一致性
+    state_rev=_v36252_state_revision(state)
+    base_rev=int(st.session_state.get('v36252_base_revision',0) or 0)
+    if cloud_ok and state_rev==base_rev:
+        add('Cloud revision','🟢 正常',f'帳本 revision {state_rev} 與本頁基準一致。',True,'both')
+    elif cloud_ok:
+        add('Cloud revision','🔴 衝突',f'帳本 revision={state_rev} / 本頁基準={base_rev}；請先從 Drive 還原。',True,'both')
+    else:
+        add('Cloud revision','⚪ 待確認',f'雲端尚未確認；目前本地 revision={state_rev} / 基準={base_rev}。')
+
+    # 6) 正式規則鎖定
+    rules_ok=_v3628_expected_rules_ok(state)
+    add('正式策略規則鎖','🟢 正常' if rules_ok else '🔴 異常',
+        'Gate D / 排序 / N+1 / 25×3.33% / queue=0 / D40 / -12% 全部一致。' if rules_ok else 'locked_rules 與正式鎖定參數不一致，禁止寫入與封存。',
+        True,'both')
+
+    # 7) 帳本結構與槽位 / 現金一致性
+    positions=(state or {}).get('positions',{}) or {}
+    pending=(state or {}).get('pending',[]) or []
+    cash=_v3624_num((state or {}).get('cash',np.nan),np.nan)
+    pos_ok=isinstance(positions,dict) and len(positions)<=V3624_MAX_POS
+    cash_ok=np.isfinite(cash) and cash>=-1.0
+    pkeys=[]
+    for x in pending:
+        if isinstance(x,dict): pkeys.append(f"{x.get('signal_date','')}|{x.get('symbol','')}")
+    dup_pending=len(pkeys)!=len(set(pkeys))
+    integrity=pos_ok and cash_ok and not dup_pending
+    add('Forward 帳本一致性','🟢 正常' if integrity else '🔴 異常',
+        f'持股 {len(positions)}/{V3624_MAX_POS}｜現金 {cash:,.0f}｜Pending {len(pending)}｜重複 Pending {"有" if dup_pending else "無"}',
+        True,'both')
+
+    # 8) MTM Ledger 基本健康度
+    led=pd.DataFrame((state or {}).get('ledger',[]) or [])
+    if led.empty:
+        add('MTM Ledger','⚪ 尚未開始','目前尚未建立每日 MTM；第一次同步後開始累積。')
+    else:
+        ld=pd.to_datetime(led.get('日期'),errors='coerce') if '日期' in led.columns else pd.Series(dtype='datetime64[ns]')
+        future=bool((ld.dt.date>now.date()).any()) if len(ld) else False
+        dup=bool(ld.dropna().duplicated().any()) if len(ld) else False
+        mtm=pd.to_numeric(led.get('MTM權益'),errors='coerce') if 'MTM權益' in led.columns else pd.Series(dtype=float)
+        bad_mtm=bool((mtm.dropna()<=0).any()) if len(mtm) else False
+        ok=(not future and not dup and not bad_mtm)
+        latest=ld.dropna().max().strftime('%Y-%m-%d') if ld.notna().any() else '未知'
+        add('MTM Ledger','🟢 正常' if ok else '🔴 異常',
+            f'最新 {latest}｜重複日期 {"有" if dup else "無"}｜未來日期 {"有" if future else "無"}｜非正權益 {"有" if bad_mtm else "無"}',
+            not ok,'both' if not ok else '')
+
+    red=sum(str(x['狀態']).startswith('🔴') for x in rows)
+    green=sum(str(x['狀態']).startswith('🟢') for x in rows)
+    neutral=len(rows)-red-green
+    overall='🟢 系統健康' if red==0 else '🔴 Fail-Closed'
+    return {
+        'rows':pd.DataFrame(rows),'overall':overall,'green':green,'red':red,'neutral':neutral,
+        'seal_blocked':len(seal_block)>0,'sync_blocked':len(sync_block)>0,
+        'seal_reasons':seal_block,'sync_reasons':sync_block,
+    }
 
 def _v3624_seal_today_signals(state, result_df):
     c,msg=_v3624_today_candidates(result_df)
@@ -7242,8 +7376,8 @@ def _v36251_drive_test():
 
 
 st.divider()
-st.subheader('📊 V3.6.27 Forward 實戰儀表板｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.27｜Forward 實戰儀表板＋Drive 自動還原＋Revision 防覆寫＋最近30版雲端備份')
+st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
+st.success('✅ Build：V3.6.28｜每日健康檢查＋Fail-Closed＋Forward 實戰儀表板＋Drive Revision 防覆寫')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7370,6 +7504,25 @@ c2.metric('單筆目標資金','3.33%')
 c3.metric('成交假設','N+1 開盤')
 c4.metric('出場規則','D40 / -12%')
 
+health28=_v3628_health_snapshot(state24,result if 'result' in globals() else pd.DataFrame())
+st.markdown('### 🩺 每日系統健康檢查')
+h1,h2,h3,h4=st.columns(4)
+h1.metric('總體狀態',health28['overall'])
+h2.metric('正常',f"{health28['green']} / {len(health28['rows'])}")
+h3.metric('中性 / 尚未觸發',health28['neutral'])
+h4.metric('異常',health28['red'])
+
+if health28['red']==0:
+    st.success('🟢 Fail-Closed 未觸發：目前沒有關鍵異常。休市日/收盤前的中性狀態不算故障。')
+else:
+    st.error('🔴 Fail-Closed 已觸發：存在關鍵異常。系統會依影響範圍禁止封存新訊號或正式帳本寫入。')
+
+st.dataframe(health28['rows'],use_container_width=True,hide_index=True)
+if health28['seal_blocked']:
+    st.warning('🔒 今日訊號封存已鎖定：'+'｜'.join(health28['seal_reasons']))
+if health28['sync_blocked']:
+    st.warning('🛡️ Forward 正式同步已鎖定：'+'｜'.join(health28['sync_reasons']))
+
 cand24,msg24=_v3624_today_candidates(result if 'result' in globals() else pd.DataFrame())
 if msg24=='OK':
     st.success(f'今日可封存 Gate D 訊號：{len(cand24)} 筆。封存後內容即固定，不會因之後價格變動回寫。')
@@ -7380,22 +7533,30 @@ else:
     st.info(msg24)
 
 b1,b2=st.columns(2)
-if b1.button('🔒 封存今日 Gate D 訊號',key='v3624_seal',use_container_width=True):
-    n24,txt24=_v3624_seal_today_signals(state24,result if 'result' in globals() else pd.DataFrame())
-    _v3624_commit(state24)
-    if n24>0: st.success(txt24)
-    else: st.warning(txt24)
-    st.rerun()
+if b1.button('🔒 封存今日 Gate D 訊號',key='v3624_seal',use_container_width=True,disabled=health28['seal_blocked']):
+    if health28['seal_blocked']:
+        st.error('Fail-Closed：目前禁止封存今日訊號。')
+    else:
+        n24,txt24=_v3624_seal_today_signals(state24,result if 'result' in globals() else pd.DataFrame())
+        if n24>0:
+            _v3624_commit(state24)
+            st.success(txt24)
+        else:
+            st.warning(txt24)
+        st.rerun()
 
-if b2.button('🔄 同步 Forward 帳本 / N+1成交 / MTM',key='v3624_sync',use_container_width=True):
-    # 順序固定：先處理舊持倉出場，再處理先前已封存 pending 訊號，再做今日 MTM。
-    _v3624_process_open_positions(state24,fee24,tax24,slip24)
-    _v3624_process_pending(state24,fee24,tax24,slip24)
-    _v3624_append_ledger(state24)
-    ok24,err24=_v3624_commit(state24)
-    if ok24: st.success('Forward 帳本同步完成。')
-    else: st.warning(f'帳本已在本次工作階段更新，但本機 JSON 儲存失敗：{err24}')
-    st.rerun()
+if b2.button('🔄 同步 Forward 帳本 / N+1成交 / MTM',key='v3624_sync',use_container_width=True,disabled=health28['sync_blocked']):
+    if health28['sync_blocked']:
+        st.error('Fail-Closed：雲端/帳本安全檢查未通過，目前禁止正式同步。')
+    else:
+        # 順序固定：先處理舊持倉出場，再處理先前已封存 pending 訊號，再做今日 MTM。
+        _v3624_process_open_positions(state24,fee24,tax24,slip24)
+        _v3624_process_pending(state24,fee24,tax24,slip24)
+        _v3624_append_ledger(state24)
+        ok24,err24=_v3624_commit(state24)
+        if ok24: st.success('Forward 帳本同步完成。')
+        else: st.warning(f'帳本已在本次工作階段更新，但本機 JSON 儲存失敗：{err24}')
+        st.rerun()
 
 m24=_v3624_metrics(state24)
 status24,status_text24=_v3624_forward_status(m24)
@@ -7546,7 +7707,7 @@ rules24=pd.DataFrame([
 st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
-    'V3.6.27 的目的不是再找更漂亮的歷史數字，而是把每天真正需要看的 Forward 資金、持倉、損益、風險與樣本進度集中在同一個實戰儀表板。'
-    '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
+    'V3.6.28 的目的不是再找更漂亮的歷史數字，而是把每天真正需要看的 Forward 資金、持倉、損益、風險與樣本進度集中在同一個實戰儀表板。'
+    '每日先看健康檢查；全部關鍵項目正常後，交易日收盤後再按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
     'OAuth 設定完成後，每次封存與同步會自動備份到 Google Drive；手動 JSON 下載仍保留作第二層備援。'
 )
