@@ -7325,3 +7325,418 @@ if not tr18.empty and px18:
                            f'V3.6.18_queue_{qsel}_audit.csv','text/csv',key='dl_v3618_audit')
 else:
     st.info('請先完成 V3.6.15 真實 MTM 資料重建；V3.6.18 直接沿用相同 Gate D 交易與完整日K。')
+
+
+# ============================================================
+# 📒 V3.6.19 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本
+# V3.6.18 正式結論：
+#   1) 不排隊（queue=0）
+#   2) Gate D = 90~94 + 站上MA200
+#   3) 最大持股 = 25
+#   4) 單筆目標資金 = 3.33%
+#   5) 槽位排序 = 分數→成交額→近MA200
+#
+# 本版不再最佳化策略參數，只驗證「可執行性與帳務一致性」：
+# NEW_SIGNAL -> ACCEPTED/REJECTED -> OPEN -> CLOSED
+# 同股持有期間的新訊號一律去重；槽位滿一律 REJECTED_SLOT，不排隊。
+# ============================================================
+
+V3619_MAX_POS = 25
+V3619_POS_PCT = 3.33
+V3619_RANK = '分數→成交額→近MA200'
+
+def _v3619_live_book(trades, price_map, initial_capital,
+                     fee_pct=0.1425, tax_pct=0.30, slippage_pct=0.10):
+    """以 V3.6.18 已鎖定規則重播一次「可實盤執行」的每日帳本。
+    每日流程：
+      1. 先依既定出場日平倉
+      2. 釋放槽位
+      3. 接收當日 Gate D 訊號
+      4. 同股持有中 -> REJECTED_DUPLICATE
+      5. 槽位已滿 -> REJECTED_SLOT（不排隊）
+      6. 依 分數→成交額→近MA200 排序成交
+      7. 收盤 MTM，建立每日現金/市值/權益/槽位/資金使用率帳本
+    """
+    if trades is None or trades.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+
+    ranked = _v3617_ranked_trades(trades, V3619_RANK).copy()
+    ranked['進場日'] = pd.to_datetime(ranked['進場日']).dt.normalize()
+    ranked['資金出場日'] = pd.to_datetime(ranked['資金出場日']).dt.normalize()
+    dates = _v3618_trade_dates(price_map, ranked)
+    if not dates:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+
+    buy_fee = fee_pct/100
+    sell_fee = (fee_pct+tax_pct)/100
+    slip = slippage_pct/100
+
+    cash = float(initial_capital)
+    open_pos = {}
+    orders = []
+    fills = []
+    ledger = []
+    positions_daily = []
+
+    signal_count = 0
+    accepted = 0
+    reject_slot = 0
+    reject_dup = 0
+    reject_cash = 0
+    reject_price = 0
+
+    def current_equity(dt):
+        mv = 0.0
+        for sym,p in open_pos.items():
+            px = _v3615_close_on(price_map, sym, dt, p['last_px'])
+            if np.isfinite(px):
+                p['last_px'] = float(px)
+            mv += p['shares'] * p['last_px']
+        return cash + mv, mv
+
+    for dt in dates:
+        # 1) CLOSE：先出場，當天釋放槽位
+        closing = [sym for sym,p in open_pos.items() if p['exit_date'] <= dt]
+        for sym in closing:
+            p = open_pos[sym]
+            exit_raw = float(p['exit_price'])
+            exit_exec = exit_raw * (1-slip)
+            gross = p['shares'] * exit_exec
+            sell_cost = gross * sell_fee
+            proceeds = gross - sell_cost
+            cash += proceeds
+            cost = p['entry_total_cost']
+            pnl = proceeds - cost
+            fills.append({
+                '股票':sym,'名稱':p['名稱'],'狀態':'CLOSED',
+                '訊號日':p['signal_date'],'進場日':p['entry_date'],'出場日':dt,
+                '技術分數':p['score'],'進場價':p['entry_raw'],'出場價':exit_raw,
+                '股數':p['shares'],'投入成本':cost,'賣出淨收入':proceeds,
+                '淨損益':pnl,'淨報酬%':pnl/cost*100 if cost else 0,
+                '出場原因':p['reason'],'持有交易日':p['hold']
+            })
+            orders.append({
+                '日期':dt,'股票':sym,'事件':'CLOSE','結果':'FILLED',
+                '原因':p['reason'],'技術分數':p['score'],
+                '持倉數_事件前':len(open_pos),'現金_事件後':cash
+            })
+            del open_pos[sym]
+
+        # 2) NEW SIGNAL：只處理當日訊號，不排隊
+        todays = ranked[ranked['進場日'] == dt].copy()
+        if not todays.empty:
+            todays = _v3617_ranked_trades(todays, V3619_RANK)
+
+        for _,r in todays.iterrows():
+            signal_count += 1
+            sym = str(r['股票']).zfill(4)
+            score = float(pd.to_numeric(r.get('技術分數原值', r.get('技術分數',0)), errors='coerce') or 0)
+
+            if sym in open_pos:
+                reject_dup += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_DUPLICATE',
+                    '原因':'同股仍在持有中','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
+            if len(open_pos) >= V3619_MAX_POS:
+                reject_slot += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_SLOT',
+                    '原因':'25槽位已滿；正式規則不排隊','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
+            d = price_map.get(sym)
+            if d is None or d.empty:
+                reject_price += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_NO_PRICE',
+                    '原因':'缺少進場日價格','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
+            entry_raw = float(r['進場價'])
+            if not np.isfinite(entry_raw) or entry_raw <= 0:
+                reject_price += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_BAD_PRICE',
+                    '原因':'進場價無效','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
+            eq_now,_ = current_equity(dt)
+            target = eq_now * V3619_POS_PCT/100
+            entry_exec = entry_raw * (1+slip)
+            unit_cost = entry_exec * (1+buy_fee)
+            alloc = min(target, cash)
+
+            # 若連目標部位的20%都無法建立，視為資金不足
+            if alloc <= 0 or alloc < target*0.20:
+                reject_cash += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_CASH',
+                    '原因':'可用現金不足','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
+            shares = alloc/unit_cost
+            entry_total_cost = shares*unit_cost
+            cash -= entry_total_cost
+
+            open_pos[sym] = {
+                '股票':sym,'名稱':r.get('名稱',''),
+                'signal_date':dt,'entry_date':dt,
+                'exit_date':pd.Timestamp(r['資金出場日']).normalize(),
+                'entry_raw':entry_raw,'entry_exec':entry_exec,
+                'entry_total_cost':entry_total_cost,'shares':shares,
+                'exit_price':float(r['出場價']),
+                'reason':str(r.get('出場原因','')),
+                'hold':int(r.get('持有交易日',40)),
+                'score':score,'last_px':entry_raw
+            }
+            accepted += 1
+            orders.append({
+                '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'ACCEPTED_OPEN',
+                '原因':'通過 Gate D / 排序 / 槽位 / 資金檢查','技術分數':score,
+                '持倉數_事件前':len(open_pos)-1,'現金_事件後':cash
+            })
+
+        # 3) EOD MTM 帳本
+        eq,mv = current_equity(dt)
+        usage = mv/eq*100 if eq>0 else np.nan
+        ledger.append({
+            '日期':dt,'現金':cash,'持倉市值':mv,'MTM權益':eq,
+            '持股檔數':len(open_pos),'可用槽位':V3619_MAX_POS-len(open_pos),
+            '資金使用率%':usage
+        })
+        for sym,p in open_pos.items():
+            market_value=p['shares']*p['last_px']
+            unreal=market_value-p['entry_total_cost']
+            positions_daily.append({
+                '日期':dt,'股票':sym,'名稱':p['名稱'],'技術分數':p['score'],
+                '進場日':p['entry_date'],'預定出場日':p['exit_date'],
+                '股數':p['shares'],'進場成本':p['entry_total_cost'],
+                '收盤價':p['last_px'],'持倉市值':market_value,
+                '未實現損益':unreal,
+                '未實現報酬%':unreal/p['entry_total_cost']*100 if p['entry_total_cost'] else 0
+            })
+
+    led = pd.DataFrame(ledger).sort_values('日期').drop_duplicates('日期',keep='last')
+    od = pd.DataFrame(orders)
+    fl = pd.DataFrame(fills)
+    pdaily = pd.DataFrame(positions_daily)
+
+    if led.empty:
+        return led,od,fl,pdaily,{}
+
+    led['權益高點'] = led['MTM權益'].cummax()
+    led['回撤%'] = (led['MTM權益']/led['權益高點']-1)*100
+    mdd = float(led['回撤%'].min())
+    final = float(led.iloc[-1]['MTM權益'])
+    total_ret = (final/initial_capital-1)*100
+    years = max((led.iloc[-1]['日期']-led.iloc[0]['日期']).days/365.25,1/365.25)
+    cagr = ((final/initial_capital)**(1/years)-1)*100 if final>0 else -100
+    calmar = cagr/abs(mdd) if mdd<0 else np.nan
+
+    gp = fl.loc[fl['淨損益']>0,'淨損益'].sum() if not fl.empty else 0
+    gl = -fl.loc[fl['淨損益']<0,'淨損益'].sum() if not fl.empty else 0
+    pf = gp/gl if gl>0 else (np.inf if gp>0 else 0)
+    win = (fl['淨損益']>0).mean()*100 if not fl.empty else np.nan
+
+    stats = {
+        '總報酬%':total_ret,'CAGR%':cagr,'MTM_MDD%':mdd,'Calmar':calmar,
+        '淨PF':pf,'淨勝率%':win,'完成交易':len(fl),
+        '總訊號':signal_count,'接受訊號':accepted,
+        '訊號承接率%':accepted/signal_count*100 if signal_count else 0,
+        '槽位拒絕':reject_slot,'同股去重':reject_dup,
+        '資金拒絕':reject_cash,'價格拒絕':reject_price,
+        '最高持股':int(led['持股檔數'].max()),
+        '平均持股':float(led['持股檔數'].mean()),
+        '平均資金使用率%':float(led['資金使用率%'].mean()),
+        '最高資金使用率%':float(led['資金使用率%'].max()),
+        '最低可用槽位':int(led['可用槽位'].min()),
+    }
+    return led,od,fl,pdaily,stats
+
+def _v3619_reconcile(ledger, orders, fills, stats, initial_capital):
+    """帳務一致性檢查：用來抓狀態機/資金帳本的邏輯錯誤。"""
+    rows=[]
+    if ledger is None or ledger.empty:
+        return pd.DataFrame()
+
+    rows.append({
+        '檢查':'MTM權益 = 現金 + 持倉市值',
+        '結果':f"最大誤差 {(ledger['MTM權益']-(ledger['現金']+ledger['持倉市值'])).abs().max():.6f}",
+        '通過':bool((ledger['MTM權益']-(ledger['現金']+ledger['持倉市值'])).abs().max() < 0.01)
+    })
+    rows.append({
+        '檢查':'持股數不得超過25',
+        '結果':f"最高 {int(ledger['持股檔數'].max())} 檔",
+        '通過':bool(ledger['持股檔數'].max() <= V3619_MAX_POS)
+    })
+    rows.append({
+        '檢查':'現金不得為負',
+        '結果':f"最低現金 {ledger['現金'].min():,.2f}",
+        '通過':bool(ledger['現金'].min() >= -0.01)
+    })
+    rows.append({
+        '檢查':'資金使用率不得異常超過100.5%',
+        '結果':f"最高 {ledger['資金使用率%'].max():.2f}%",
+        '通過':bool(ledger['資金使用率%'].max() <= 100.5)
+    })
+    accepted = int((orders['結果']=='ACCEPTED_OPEN').sum()) if not orders.empty else 0
+    rows.append({
+        '檢查':'接受訊號數與 OPEN 訂單一致',
+        '結果':f"{accepted} vs {int(stats.get('接受訊號',0))}",
+        '通過':accepted == int(stats.get('接受訊號',0))
+    })
+    closed = int((orders['結果']=='FILLED').sum()) if not orders.empty else 0
+    rows.append({
+        '檢查':'CLOSE 成交與完成交易一致',
+        '結果':f"{closed} vs {len(fills)}",
+        '通過':closed == len(fills)
+    })
+    rows.append({
+        '檢查':'正式規則沒有排隊狀態',
+        '結果':'0 筆 QUEUED' if orders.empty or not orders['結果'].astype(str).str.contains('QUEUE').any() else '發現排隊狀態',
+        '通過':bool(orders.empty or not orders['結果'].astype(str).str.contains('QUEUE').any())
+    })
+    return pd.DataFrame(rows)
+
+def _v3619_yearly(ledger, fills):
+    if ledger is None or ledger.empty:
+        return pd.DataFrame()
+    z=ledger.copy()
+    z['年度']=pd.to_datetime(z['日期']).dt.year
+    f=fills.copy() if fills is not None else pd.DataFrame()
+    if not f.empty:
+        f['年度']=pd.to_datetime(f['出場日']).dt.year
+    rows=[]
+    for y,g in z.groupby('年度'):
+        g=g.sort_values('日期')
+        first=float(g.iloc[0]['MTM權益']); last=float(g.iloc[-1]['MTM權益'])
+        ret=(last/first-1)*100 if first else np.nan
+        peak=g['MTM權益'].cummax()
+        mdd=float(((g['MTM權益']/peak)-1).min()*100)
+        fy=f[f['年度']==y] if not f.empty else pd.DataFrame()
+        gp=fy.loc[fy['淨損益']>0,'淨損益'].sum() if not fy.empty else 0
+        gl=-fy.loc[fy['淨損益']<0,'淨損益'].sum() if not fy.empty else 0
+        pf=gp/gl if gl>0 else (np.inf if gp>0 else 0)
+        rows.append({
+            '年度':int(y),'年度報酬%':ret,'年度MDD%':mdd,
+            '淨PF':pf,'淨勝率%':(fy['淨損益']>0).mean()*100 if not fy.empty else np.nan,
+            '完成交易':len(fy),
+            '平均持股':float(g['持股檔數'].mean()),
+            '平均資金使用率%':float(g['資金使用率%'].mean())
+        })
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('📒 V3.6.19 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本')
+st.caption('V3.6.18 已正式淘汰排隊：queue=0。現在固定 Gate D、25檔、每筆3.33%、分數→成交額→近MA200；只驗證實盤狀態機與帳務一致性，不再調策略參數。')
+
+tr19 = st.session_state.get('v3615_trades', pd.DataFrame())
+px19 = st.session_state.get('v3615_prices', {})
+
+if not tr19.empty and px19:
+    led19,ord19,fill19,pos19,stat19 = _v3619_live_book(
+        tr19, px19, capital, fee, tax, slip
+    )
+    if stat19:
+        st.markdown('### 🧾 ㉙ 正式規則執行摘要')
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('CAGR%',f"{stat19['CAGR%']:.2f}")
+        c2.metric('真正 MTM MDD%',f"{stat19['MTM_MDD%']:.2f}")
+        c3.metric('Calmar',f"{stat19['Calmar']:.2f}")
+        c4.metric('淨PF',f"{stat19['淨PF']:.2f}")
+        c5,c6,c7,c8=st.columns(4)
+        c5.metric('總訊號',f"{stat19['總訊號']}")
+        c6.metric('接受訊號',f"{stat19['接受訊號']}")
+        c7.metric('槽位拒絕',f"{stat19['槽位拒絕']}")
+        c8.metric('同股去重',f"{stat19['同股去重']}")
+
+        summary19=pd.DataFrame([stat19])
+        st.dataframe(summary19.round(4),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🧮 ㉚ 帳務一致性 / 狀態機驗證')
+        rec19=_v3619_reconcile(led19,ord19,fill19,stat19,capital)
+        st.dataframe(rec19,use_container_width=True,hide_index=True)
+
+        st.markdown('### 📅 ㉛ 年度實盤帳本穩定度')
+        yr19=_v3619_yearly(led19,fill19)
+        st.dataframe(yr19.round(4),use_container_width=True,hide_index=True)
+
+        st.markdown('### 📈 ㉜ 每日 MTM 權益 / 槽位使用')
+        if not led19.empty:
+            st.line_chart(led19.set_index('日期')[['MTM權益']])
+            st.dataframe(
+                led19[['日期','現金','持倉市值','MTM權益','持股檔數','可用槽位','資金使用率%','回撤%']]
+                .tail(120).round(4),
+                use_container_width=True,hide_index=True
+            )
+
+        st.markdown('### 🔁 ㉝ 訂單生命週期 / 拒絕原因')
+        if not ord19.empty:
+            reason19=(
+                ord19.groupby(['事件','結果','原因'],dropna=False)
+                .size().reset_index(name='筆數')
+                .sort_values('筆數',ascending=False)
+            )
+            st.dataframe(reason19,use_container_width=True,hide_index=True)
+            with st.expander('查看最近 500 筆訂單事件'):
+                st.dataframe(ord19.tail(500),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🧠 ㉞ V3.6.19 正式可執行判定')
+        checks19=pd.DataFrame([
+            {'驗證':'帳務一致性全部通過','結果':f"{int(rec19['通過'].sum())}/{len(rec19)}",
+             '通過':bool(rec19['通過'].all())},
+            {'驗證':'最高持股≤25','結果':f"{stat19['最高持股']} 檔",
+             '通過':stat19['最高持股']<=25},
+            {'驗證':'沒有資金透支','結果':f"資金拒絕 {stat19['資金拒絕']} 筆",
+             '通過':bool(led19['現金'].min()>=-0.01)},
+            {'驗證':'至少2/3年度正報酬',
+             '結果':f"{((yr19['年度報酬%']>0).mean()*100 if len(yr19) else 0):.1f}%",
+             '通過':bool(len(yr19)>0 and (yr19['年度報酬%']>0).mean()>=2/3)},
+            {'驗證':'淨PF≥1.50','結果':f"{stat19['淨PF']:.2f}",
+             '通過':stat19['淨PF']>=1.50},
+            {'驗證':'真正MTM MDD≥-25%','結果':f"{stat19['MTM_MDD%']:.2f}%",
+             '通過':stat19['MTM_MDD%']>=-25},
+            {'驗證':'Calmar≥1.50','結果':f"{stat19['Calmar']:.2f}",
+             '通過':stat19['Calmar']>=1.50},
+        ])
+        st.dataframe(checks19,use_container_width=True,hide_index=True)
+
+        if bool(checks19['通過'].all()):
+            st.success('🟢 V3.6.19 通過：選股、槽位、資金、去重、進出場與每日 MTM 帳本可一致重播。下一階段可進入「Walk-Forward / 時間切割鎖參數」驗證，確認不是整段資料最佳化造成的結果。')
+        else:
+            st.warning('🟡 V3.6.19 尚有實盤帳務或穩健性條件未通過；先不要進 Walk-Forward，應先修正失敗項目。')
+
+        st.download_button(
+            '⬇️ 下載 V3.6.19 每日帳本',
+            led19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.19_daily_ledger.csv','text/csv',key='dl_v3619_ledger'
+        )
+        st.download_button(
+            '⬇️ 下載 V3.6.19 訂單事件',
+            ord19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.19_order_events.csv','text/csv',key='dl_v3619_orders'
+        )
+        st.download_button(
+            '⬇️ 下載 V3.6.19 完成交易',
+            fill19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.19_closed_trades.csv','text/csv',key='dl_v3619_fills'
+        )
+        st.download_button(
+            '⬇️ 下載 V3.6.19 每日持倉明細',
+            pos19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.19_daily_positions.csv','text/csv',key='dl_v3619_positions'
+        )
+else:
+    st.info('請先完成 V3.6.15 真實 MTM 資料重建；V3.6.19 直接沿用同一批 Gate D 交易與完整日K。')
