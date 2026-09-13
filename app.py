@@ -21,7 +21,7 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title='🖤 黑嚕嚕－台股盤中雷達', page_icon='🖤', layout='wide', initial_sidebar_state='expanded')
 
-V3_6_13_LABEL = 'V3.6.14｜Gate D 可行容量最佳化版'
+V3_6_13_LABEL = 'V3.6.15｜Gate D 真實逐日 MTM 資金曲線版'
 
 st.markdown('''
 <style>
@@ -6317,6 +6317,173 @@ with t6:
     else:
         st.info('容量引擎需要 Gate D 歷史事件。第一次進入或清除 Streamlit 快取後，請先按上方「建立 Gate D 鎖定事件資料」一次；Gate D 規則仍固定為 90~94＋站上MA200，不重新選模。')
 
+
+# ============================================================
+# 📈 V3.6.15 Gate D 真實逐日 Mark-to-Market Portfolio Engine
+# 重要修正：V3.6.14 在事件表缺少出場日時，曾以「進場日 + 持有天數(日曆日)」
+# 近似資金出場日。V3.6.15 重新回抓每檔完整日K，依原始鎖定規則
+# 「90~94 + 站上MA200；40交易日 + 盤中 -12% 硬停損」重建真正出場交易日，
+# 再逐交易日把未實現損益納入權益，計算真正 Portfolio MDD。
+# ============================================================
+
+def _v3615_rebuild_trades_and_prices(events):
+    if events is None or events.empty:
+        return pd.DataFrame(),{},pd.DataFrame()
+    base=events[_v3611_event_mask(events)].copy()
+    if base.empty:return pd.DataFrame(),{},pd.DataFrame()
+    base['進場日']=pd.to_datetime(base['進場日']).dt.normalize()
+    rows=[]; price_map={}; diag=[]
+    symbols=base['股票'].astype(str).str.zfill(4).drop_duplicates().tolist()
+    prog=st.progress(0) if symbols else None
+    for k,sym in enumerate(symbols):
+        try:
+            df,market_hint,ticker=_v369_download_with_meta(sym)
+            if df is None or df.empty:
+                diag.append({'股票':sym,'狀態':'K線失敗','重建交易':0});continue
+            d=indicators(df.copy())
+            d.index=pd.to_datetime(d.index).tz_localize(None) if getattr(pd.to_datetime(d.index),'tz',None) is not None else pd.to_datetime(d.index)
+            d=d[~d.index.duplicated(keep='last')].sort_index()
+            price_map[sym]=d[['Open','High','Low','Close','Volume']].copy()
+            g=base[base['股票'].astype(str).str.zfill(4)==sym]
+            cnt=0
+            for _,r in g.iterrows():
+                dt=pd.Timestamp(r['進場日']).normalize()
+                loc=np.where(d.index.normalize()==dt)[0]
+                if len(loc)==0:continue
+                i=int(loc[-1])
+                tr=_v368_locked_baseline_trade(d,i)
+                if not tr:continue
+                rr=r.to_dict()
+                rr['進場日']=pd.Timestamp(tr['進場日'])
+                rr['資金出場日']=pd.Timestamp(tr['出場日'])
+                rr['持有交易日']=int(tr.get('持有天數',40))
+                rr['重建進場價']=float(tr['進場價'])
+                rr['重建出場價']=float(tr['出場價'])
+                rr['重建毛報酬%']=float(tr['報酬%'])
+                rr['重建出場原因']=str(tr.get('出場原因',''))
+                rows.append(rr);cnt+=1
+            diag.append({'股票':sym,'狀態':'OK','重建交易':cnt,'K線起日':d.index.min().strftime('%Y-%m-%d'),'K線迄日':d.index.max().strftime('%Y-%m-%d')})
+        except Exception as e:
+            diag.append({'股票':sym,'狀態':f'失敗:{type(e).__name__}','重建交易':0})
+        finally:
+            if prog is not None:prog.progress((k+1)/max(len(symbols),1))
+    if prog is not None:prog.empty()
+    z=pd.DataFrame(rows)
+    if not z.empty:
+        z=z.sort_values(['進場日','技術分數'],ascending=[True,False]).reset_index(drop=True)
+    return z,price_map,pd.DataFrame(diag)
+
+def _v3615_close_on(price_map,sym,dt, fallback=np.nan):
+    d=price_map.get(str(sym).zfill(4))
+    if d is None or d.empty:return fallback
+    dt=pd.Timestamp(dt).normalize()
+    try:
+        if dt in d.index:
+            v=pd.to_numeric(d.loc[dt,'Close'],errors='coerce')
+            if isinstance(v,pd.Series):v=v.iloc[-1]
+            return float(v) if pd.notna(v) else fallback
+        prev=d.loc[d.index<=dt,'Close']
+        return float(prev.iloc[-1]) if len(prev) else fallback
+    except Exception:return fallback
+
+def _v3615_true_mtm(trades,price_map,initial_capital=1_000_000,max_positions=25,position_pct=4.0,
+                    fee_pct=0.1425,tax_pct=0.30,slippage_pct=0.10):
+    if trades is None or trades.empty:return pd.DataFrame(),pd.DataFrame(),{}
+    x=trades.copy().sort_values(['進場日','技術分數'],ascending=[True,False])
+    buy_fee=fee_pct/100; sell_fee=(fee_pct+tax_pct)/100; slip=slippage_pct/100
+    cash=float(initial_capital); open_pos=[]; logs=[]; curve=[]
+    signal_count=accepted=rejected_slot=rejected_cash=rejected_same=0
+    start=pd.Timestamp(x['進場日'].min()).normalize(); end=pd.Timestamp(x['資金出場日'].max()).normalize()
+    all_dates=set()
+    for sym in x['股票'].astype(str).str.zfill(4).unique():
+        d=price_map.get(sym)
+        if d is not None and not d.empty:
+            all_dates.update(pd.Timestamp(v).normalize() for v in d.index if start<=pd.Timestamp(v).normalize()<=end)
+    dates=sorted(all_dates)
+    if not dates:return pd.DataFrame(),pd.DataFrame(),{}
+
+    def mtm_equity(dt):
+        mv=0.0
+        for p in open_pos:
+            px=_v3615_close_on(price_map,p['股票'],dt,p['last_px'])
+            if np.isfinite(px):p['last_px']=px
+            mv+=p['shares']*p['last_px']
+        return cash+mv,mv
+
+    for dt in dates:
+        # 先以真實策略出場日平倉，當天資金可再使用
+        closing=[p for p in open_pos if p['exit_date']<=dt]
+        for p in closing:
+            exit_raw=float(p['exit_price'])
+            exit_exec=exit_raw*(1-slip)
+            proceeds=p['shares']*exit_exec*(1-sell_fee)
+            cash+=proceeds
+            cost=p['shares']*p['entry_exec']*(1+buy_fee)
+            pnl=proceeds-cost
+            logs.append({'股票':p['股票'],'名稱':p['名稱'],'進場日':p['entry_date'],'出場日':p['exit_date'],
+                         '技術分數':p['score'],'投入資金':cost,'進場價':p['entry_raw'],'出場價':exit_raw,
+                         '出場原因':p['reason'],'淨損益':pnl,'淨報酬%':pnl/cost*100 if cost else 0,
+                         '持有交易日':p['hold']})
+            open_pos.remove(p)
+
+        todays=x[x['進場日']==dt]
+        held={p['股票'] for p in open_pos}
+        for _,r in todays.iterrows():
+            signal_count+=1;sym=str(r['股票']).zfill(4)
+            if sym in held:rejected_same+=1;continue
+            if len(open_pos)>=max_positions:rejected_slot+=1;continue
+            eq_now,_=mtm_equity(dt)
+            target=max(0.0,eq_now*position_pct/100)
+            entry_raw=float(r['重建進場價']);entry_exec=entry_raw*(1+slip)
+            per_share=entry_exec*(1+buy_fee)
+            alloc=min(target,cash)
+            if alloc<=0 or (target>0 and alloc<target*.20):rejected_cash+=1;continue
+            shares=alloc/per_share
+            actual_cost=shares*per_share
+            cash-=actual_cost
+            open_pos.append({'股票':sym,'名稱':r.get('名稱',''),'entry_date':dt,'exit_date':pd.Timestamp(r['資金出場日']),
+                             'score':float(r['技術分數']),'shares':shares,'entry_raw':entry_raw,'entry_exec':entry_exec,
+                             'exit_price':float(r['重建出場價']),'reason':str(r['重建出場原因']),
+                             'hold':int(r['持有交易日']),'last_px':entry_raw})
+            held.add(sym);accepted+=1
+        eq,mv=mtm_equity(dt)
+        curve.append({'日期':dt,'MTM權益':eq,'現金':cash,'持倉市值':mv,'持倉數':len(open_pos),
+                      '資金使用率%':mv/eq*100 if eq>0 else np.nan})
+
+    eq=pd.DataFrame(curve).sort_values('日期').drop_duplicates('日期',keep='last')
+    lg=pd.DataFrame(logs)
+    if eq.empty:return eq,lg,{}
+    eq['權益高點']=eq['MTM權益'].cummax();eq['回撤%']=(eq['MTM權益']/eq['權益高點']-1)*100
+    mdd=float(eq['回撤%'].min()); trough_i=eq['回撤%'].idxmin(); trough_date=eq.loc[trough_i,'日期']
+    pre=eq.loc[:trough_i]; peak_i=pre['MTM權益'].idxmax(); peak_date=eq.loc[peak_i,'日期']
+    final=float(eq.iloc[-1]['MTM權益']); total_ret=(final/initial_capital-1)*100
+    years=max((eq.iloc[-1]['日期']-eq.iloc[0]['日期']).days/365.25,1/365.25)
+    cagr=((final/initial_capital)**(1/years)-1)*100 if final>0 else -100.0
+    calmar=cagr/abs(mdd) if mdd<0 else np.nan
+    wins=(lg['淨損益']>0).mean()*100 if len(lg) else np.nan
+    gp=lg.loc[lg['淨損益']>0,'淨損益'].sum() if len(lg) else 0;gl=-lg.loc[lg['淨損益']<0,'淨損益'].sum() if len(lg) else 0
+    pf=gp/gl if gl>0 else (np.inf if gp>0 else 0)
+    stats={'初始資金':initial_capital,'期末MTM權益':final,'總報酬%':total_ret,'CAGR%':cagr,'真實MTM_MDD%':mdd,
+           'Calmar':calmar,'MDD高點日':peak_date,'MDD低點日':trough_date,'完成交易':len(lg),'淨勝率%':wins,'淨PF':pf,
+           '最大同時持股':max_positions,'單筆目標資金%':position_pct,'實際最高持股':int(eq['持倉數'].max()),
+           '平均持股數':float(eq['持倉數'].mean()),'總進場訊號':signal_count,'接受訊號':accepted,
+           '訊號承接率%':accepted/signal_count*100 if signal_count else 0,'槽位不足淘汰':rejected_slot,
+           '資金不足淘汰':rejected_cash,'同股重複略過':rejected_same,'平均資金使用率%':float(eq['資金使用率%'].mean()),
+           '最高資金使用率%':float(eq['資金使用率%'].max())}
+    return eq,lg,stats
+
+def _v3615_candidate_grid(trades,price_map,capital,fee,tax,slip):
+    candidates=[(20,5.0),(25,4.0),(25,3.33),(25,3.0),(30,3.33)]
+    rows=[];packs={}
+    for mp,pp in candidates:
+        eq,lg,stt=_v3615_true_mtm(trades,price_map,capital,mp,pp,fee,tax,slip)
+        if not stt:continue
+        stt['配置']=f'{mp}檔 × {pp:g}%';stt['報酬/MDD']=stt['總報酬%']/abs(stt['真實MTM_MDD%']) if stt['真實MTM_MDD%']<0 else np.nan
+        rows.append(stt);packs[(mp,pp)]=(eq,lg,stt)
+    d=pd.DataFrame(rows)
+    if not d.empty:d=d.sort_values(['Calmar','淨PF','總報酬%'],ascending=False).reset_index(drop=True)
+    return d,packs
+
     st.divider()
     st.subheader('🧪 V3.6.14 可行資金容量 / 同時持股壓力測試')
     st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
@@ -6389,3 +6556,56 @@ with t6:
                 )
 
             st.warning('V3.6.14 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
+
+
+# ============================================================
+# 🧪 V3.6.15 真實逐日 MTM 驗證區
+# ============================================================
+st.divider()
+st.subheader('📈 V3.6.15 真實逐日 MTM Portfolio MDD / 資金曲線')
+st.caption('Gate D 完全不改：90~94＋站上MA200。這一版只修正時間軸並把未實現損益逐日計入權益；同時修正 V3.6.14 事件表缺出場日時以日曆日近似造成的容量誤差。')
+st.info('請先用 V3.6.14 的完整股票池建立 Gate D 事件，再按下方按鈕。第一次需要重新取得 Gate D 股票的歷史日K；之後會利用 Streamlit 快取。')
+
+if pack:
+    if st.button('▶ 執行 V3.6.15 真實 MTM 驗證',type='primary',key='run_v3615'):
+        with st.spinner('正在重建真實出場交易日與逐日持倉價格…'):
+            mtm_trades,mtm_prices,mtm_diag=_v3615_rebuild_trades_and_prices(pack['events'])
+            st.session_state['v3615_trades']=mtm_trades
+            st.session_state['v3615_prices']=mtm_prices
+            st.session_state['v3615_diag']=mtm_diag
+    mtm_trades=st.session_state.get('v3615_trades',pd.DataFrame())
+    mtm_prices=st.session_state.get('v3615_prices',{})
+    mtm_diag=st.session_state.get('v3615_diag',pd.DataFrame())
+    if not mtm_trades.empty and mtm_prices:
+        st.success(f'真實時間軸重建完成：{len(mtm_trades):,} 筆 Gate D 交易、{len(mtm_prices):,} 檔股票具完整日K。')
+        with st.expander('🔎 查看 MTM K線 / 出場日重建診斷'):
+            st.dataframe(mtm_diag,use_container_width=True,hide_index=True)
+        grid15,packs15=_v3615_candidate_grid(mtm_trades,mtm_prices,capital,fee,tax,slip)
+        show_cols=['配置','總報酬%','CAGR%','真實MTM_MDD%','Calmar','淨PF','淨勝率%','完成交易','訊號承接率%','實際最高持股','平均持股數','平均資金使用率%','最高資金使用率%','槽位不足淘汰','資金不足淘汰','報酬/MDD']
+        st.markdown('### 🏆 ⑬ 五組候選｜真實 MTM 壓力測試')
+        st.dataframe(grid15[[c for c in show_cols if c in grid15.columns]].round(4),use_container_width=True,hide_index=True)
+        if not grid15.empty:
+            best=grid15.iloc[0]
+            st.success(f"目前 MTM 風險效率首選：{best['配置']}｜總報酬 {best['總報酬%']:.1f}%｜CAGR {best['CAGR%']:.1f}%｜真正MDD {best['真實MTM_MDD%']:.1f}%｜Calmar {best['Calmar']:.2f}｜淨PF {best['淨PF']:.2f}")
+        st.markdown('### 🔬 ⑭ 指定配置逐日資金曲線')
+        c1,c2=st.columns(2)
+        mp15=c1.selectbox('MTM最大同時持股',[20,25,30],index=1,key='v3615_mp')
+        allowed={20:[5.0],25:[3.0,3.33,4.0],30:[3.33]}
+        pp15=c2.selectbox('MTM單筆目標資金%',allowed[mp15],index=0,key='v3615_pp')
+        eq15,lg15,st15=_v3615_true_mtm(mtm_trades,mtm_prices,capital,mp15,pp15,fee,tax,slip)
+        if st15:
+            a,b,c,d=st.columns(4);a.metric('總報酬%',f"{st15['總報酬%']:.2f}");b.metric('CAGR%',f"{st15['CAGR%']:.2f}");c.metric('真正MTM MDD%',f"{st15['真實MTM_MDD%']:.2f}");d.metric('Calmar',f"{st15['Calmar']:.2f}")
+            e,f,g,h=st.columns(4);e.metric('淨PF',f"{st15['淨PF']:.2f}");f.metric('完成交易',st15['完成交易']);g.metric('訊號承接率%',f"{st15['訊號承接率%']:.1f}");h.metric('最高資金使用率%',f"{st15['最高資金使用率%']:.1f}")
+            st.caption(f"最大回撤區間：高點 {pd.Timestamp(st15['MDD高點日']).strftime('%Y-%m-%d')} → 低點 {pd.Timestamp(st15['MDD低點日']).strftime('%Y-%m-%d')}")
+            if not eq15.empty:
+                st.line_chart(eq15.set_index('日期')[['MTM權益']],use_container_width=True)
+                st.line_chart(eq15.set_index('日期')[['回撤%']],use_container_width=True)
+            with st.expander('查看 V3.6.15 真實成交明細'):
+                st.dataframe(lg15,use_container_width=True,hide_index=True)
+            st.download_button('⬇️ 下載 V3.6.15 MTM 資金曲線',eq15.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.15_MTM_equity.csv','text/csv',key='dl_v3615_eq')
+            st.download_button('⬇️ 下載 V3.6.15 MTM 交易明細',lg15.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),'V3.6.15_MTM_trades.csv','text/csv',key='dl_v3615_trades')
+        st.warning('判讀原則：V3.6.15 的「真正MTM MDD」才是主要風險指標；V3.6.14 的實現權益MDD保留作容量初篩，但不再作最終風險判定。')
+    else:
+        st.info('尚未建立 V3.6.15 MTM 資料。請按「▶ 執行 V3.6.15 真實 MTM 驗證」。')
+else:
+    st.info('請先建立 Gate D 鎖定事件資料，再執行 V3.6.15。')
