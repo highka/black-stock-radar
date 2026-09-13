@@ -9006,26 +9006,62 @@ def _v3624_save_state(state):
         return False, f'{type(e).__name__}: {e}'
 
 def _v3624_load_state():
-    # session_state 優先，避免每次 rerun 都重新讀檔
+    # session_state 優先，避免每次 rerun 都重複打 Google Drive API
     if 'v3624_state' in st.session_state and isinstance(st.session_state['v3624_state'], dict):
         return st.session_state['v3624_state']
+
+    # V3.6.25：若已設定 Google Drive，優先把雲端帳本視為 Source of Truth。
+    try:
+        if '_v3625_drive_download_state' in globals():
+            drive_state, drive_msg = _v3625_drive_download_state()
+            if isinstance(drive_state, dict):
+                st.session_state['v3624_state'] = drive_state
+                st.session_state['v3625_last_drive_status'] = {
+                    'ok': True, 'configured': True, 'message': drive_msg
+                }
+                _v3624_save_state(drive_state)
+                return drive_state
+    except Exception:
+        pass
+
+    # Drive 未設定或暫時無法讀取時，再使用本機備援。
     try:
         if os.path.exists(V3624_STATE_FILE):
             with open(V3624_STATE_FILE, 'r', encoding='utf-8') as f:
                 state=_v3624_json.load(f)
-            if isinstance(state, dict) and state.get('version') == V3624_VERSION:
+            if isinstance(state, dict) and (
+                str(state.get('version','')).startswith('V3.6.24') or
+                str(state.get('version','')).startswith('V3.6.25')
+            ):
+                state['version'] = 'V3.6.25'
                 st.session_state['v3624_state']=state
                 return state
     except Exception:
         pass
+
     state=_v3624_empty_state()
+    state['version']='V3.6.25'
     st.session_state['v3624_state']=state
     return state
 
 def _v3624_commit(state):
     state['last_sync']=taiwan_time_text()
+    state['version']='V3.6.25'
     st.session_state['v3624_state']=state
-    return _v3624_save_state(state)
+    local_ok, local_err = _v3624_save_state(state)
+
+    # V3.6.25：若 Drive 已設定，每次封存 / 同步 / 重設後自動上傳。
+    try:
+        if '_v3625_drive_upload_state' in globals():
+            cfg = _v3625_drive_config()
+            if cfg.get('configured'):
+                _v3625_drive_upload_state(state)
+    except Exception as e:
+        st.session_state['v3625_last_drive_status'] = {
+            'ok': False, 'configured': True,
+            'message': f'{type(e).__name__}: {e}'
+        }
+    return local_ok, local_err
 
 def _v3624_num(v, default=np.nan):
     x=pd.to_numeric(v, errors='coerce')
@@ -9326,9 +9362,223 @@ def _v3624_forward_status(m):
     return '🟢 正常','Forward 尚未出現超出目前 Monte Carlo 壓力範圍的明顯異常。'
 
 
+
+# ============================================================
+# ☁️ V3.6.25 Google Drive 永久 Forward 帳本
+# 以 Google Drive 作為 Forward JSON 的雲端 Source of Truth。
+# Streamlit Cloud 本機 JSON 仍保留作為快取 / 第二層備援。
+#
+# 需要 requirements.txt：
+# google-api-python-client
+# google-auth
+# google-auth-httplib2
+#
+# 需要 Streamlit secrets：
+#
+# [google_drive]
+# folder_id = "你的Google Drive資料夾ID"
+# state_filename = "V3.6.25_forward_state.json"
+#
+# [gdrive_service_account]
+# type = "service_account"
+# project_id = "..."
+# private_key_id = "..."
+# private_key = """-----BEGIN PRIVATE KEY-----
+# ...
+# -----END PRIVATE KEY-----
+# """
+# client_email = "...@...iam.gserviceaccount.com"
+# client_id = "..."
+# auth_uri = "https://accounts.google.com/o/oauth2/auth"
+# token_uri = "https://oauth2.googleapis.com/token"
+# auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+# client_x509_cert_url = "..."
+#
+# 最後要把 Google Drive 目標資料夾分享給 client_email，權限設「編輯者」。
+# ============================================================
+
+V3625_DRIVE_DEFAULT_FILENAME = 'V3.6.25_forward_state.json'
+
+def _v3625_drive_config():
+    try:
+        gd = dict(st.secrets.get('google_drive', {}))
+        sa = dict(st.secrets.get('gdrive_service_account', {}))
+    except Exception:
+        gd, sa = {}, {}
+    folder_id = str(gd.get('folder_id', '')).strip()
+    filename = str(gd.get('state_filename', V3625_DRIVE_DEFAULT_FILENAME)).strip() or V3625_DRIVE_DEFAULT_FILENAME
+    configured = bool(folder_id and sa.get('client_email') and sa.get('private_key'))
+    return {
+        'configured': configured,
+        'folder_id': folder_id,
+        'filename': filename,
+        'service_account': sa,
+        'client_email': str(sa.get('client_email', '')).strip(),
+    }
+
+def _v3625_drive_imports_ok():
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        return True, ''
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+def _v3625_drive_service():
+    cfg = _v3625_drive_config()
+    if not cfg['configured']:
+        raise RuntimeError('Google Drive 尚未完成 Streamlit Secrets 設定')
+    ok, err = _v3625_drive_imports_ok()
+    if not ok:
+        raise RuntimeError(
+            '缺少 Google Drive Python 套件。請更新 requirements.txt：'
+            'google-api-python-client / google-auth / google-auth-httplib2。'
+            f' 原始錯誤：{err}'
+        )
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    scopes = ['https://www.googleapis.com/auth/drive']
+    creds = Credentials.from_service_account_info(
+        cfg['service_account'],
+        scopes=scopes
+    )
+    return build('drive', 'v3', credentials=creds, cache_discovery=False), cfg
+
+def _v3625_drive_find_state_file(service, cfg):
+    safe_name = cfg['filename'].replace("'", "\\'")
+    q = (
+        f"name = '{safe_name}' and "
+        f"'{cfg['folder_id']}' in parents and trashed = false"
+    )
+    resp = service.files().list(
+        q=q,
+        spaces='drive',
+        fields='files(id,name,modifiedTime,size)',
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+    files = resp.get('files', [])
+    if not files:
+        return None
+    files = sorted(files, key=lambda x: x.get('modifiedTime', ''), reverse=True)
+    return files[0]
+
+def _v3625_drive_upload_state(state):
+    import io
+    cfg = _v3625_drive_config()
+    if not cfg['configured']:
+        st.session_state['v3625_last_drive_status'] = {
+            'ok': False, 'configured': False,
+            'message': '尚未設定 Google Drive 永久帳本'
+        }
+        return False, 'Drive not configured'
+    try:
+        service, cfg = _v3625_drive_service()
+        payload = _v3624_json.dumps(
+            state, ensure_ascii=False, indent=2,
+            default=_v3624_json_default
+        ).encode('utf-8')
+        from googleapiclient.http import MediaIoBaseUpload
+        media = MediaIoBaseUpload(
+            io.BytesIO(payload),
+            mimetype='application/json',
+            resumable=False
+        )
+        existing = _v3625_drive_find_state_file(service, cfg)
+        if existing:
+            saved = service.files().update(
+                fileId=existing['id'],
+                media_body=media,
+                fields='id,name,modifiedTime,size',
+                supportsAllDrives=True
+            ).execute()
+            action = '更新'
+        else:
+            saved = service.files().create(
+                body={
+                    'name': cfg['filename'],
+                    'parents': [cfg['folder_id']],
+                    'mimeType': 'application/json'
+                },
+                media_body=media,
+                fields='id,name,modifiedTime,size',
+                supportsAllDrives=True
+            ).execute()
+            action = '建立'
+        msg = (
+            f"Google Drive {action}成功｜{saved.get('name', cfg['filename'])}｜"
+            f"{saved.get('modifiedTime','')}"
+        )
+        st.session_state['v3625_last_drive_status'] = {
+            'ok': True, 'configured': True,
+            'message': msg,
+            'file_id': saved.get('id',''),
+            'modifiedTime': saved.get('modifiedTime','')
+        }
+        return True, msg
+    except Exception as e:
+        msg = f'{type(e).__name__}: {e}'
+        st.session_state['v3625_last_drive_status'] = {
+            'ok': False, 'configured': True,
+            'message': msg
+        }
+        return False, msg
+
+def _v3625_drive_download_state():
+    cfg = _v3625_drive_config()
+    if not cfg['configured']:
+        return None, 'Drive not configured'
+    try:
+        service, cfg = _v3625_drive_service()
+        existing = _v3625_drive_find_state_file(service, cfg)
+        if not existing:
+            return None, 'Drive 尚未有 Forward 帳本'
+        content = service.files().get_media(
+            fileId=existing['id'],
+            supportsAllDrives=True
+        ).execute()
+        if isinstance(content, bytes):
+            state = _v3624_json.loads(content.decode('utf-8'))
+        else:
+            state = _v3624_json.loads(bytes(content).decode('utf-8'))
+        if not isinstance(state, dict):
+            return None, 'Drive JSON 格式錯誤'
+        # V3.6.24 / V3.6.25 共用同一 Forward 帳本 schema，允許版本升級延續。
+        if not str(state.get('version','')).startswith('V3.6.24') and not str(state.get('version','')).startswith('V3.6.25'):
+            return None, f"Drive 帳本版本不相容：{state.get('version')}"
+        state['version'] = 'V3.6.25'
+        return state, (
+            f"Drive 讀取成功｜{existing.get('name','')}｜"
+            f"{existing.get('modifiedTime','')}"
+        )
+    except Exception as e:
+        return None, f'{type(e).__name__}: {e}'
+
+def _v3625_drive_test():
+    cfg = _v3625_drive_config()
+    if not cfg['configured']:
+        return False, '尚未設定 Streamlit Secrets'
+    try:
+        service, cfg = _v3625_drive_service()
+        folder = service.files().get(
+            fileId=cfg['folder_id'],
+            fields='id,name,mimeType',
+            supportsAllDrives=True
+        ).execute()
+        existing = _v3625_drive_find_state_file(service, cfg)
+        file_text = '尚未建立 Forward JSON' if not existing else (
+            f"已存在 {existing.get('name')}｜{existing.get('modifiedTime','')}"
+        )
+        return True, f"資料夾：{folder.get('name','')}｜{file_text}"
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
 st.divider()
-st.subheader('🧪 V3.6.24.2 Forward Test / Paper Trading｜JSON Hard Fix')
-st.success('✅ Build：V3.6.24.2｜JSON 模組已載入｜Forward Hard Fix')
+st.subheader('☁️ V3.6.25 Forward Test / Paper Trading｜Google Drive 永久帳本')
+st.success('✅ Build：V3.6.25｜Forward 規則鎖定｜支援 Google Drive 自動永久備份')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -9345,6 +9595,54 @@ except Exception as _v3624_json_err:
     st.stop()
 
 state24=_v3624_load_state()
+
+st.markdown('### ☁️ Google Drive 永久帳本狀態')
+cfg25=_v3625_drive_config()
+g1,g2,g3=st.columns(3)
+g1.metric('Drive永久備份','已設定' if cfg25['configured'] else '尚未設定')
+g2.metric('雲端檔名',cfg25['filename'])
+g3.metric('Service Account',cfg25['client_email'] if cfg25['client_email'] else '—')
+
+pkg_ok25,pkg_err25=_v3625_drive_imports_ok()
+if not pkg_ok25:
+    st.error(
+        'V3.6.25 尚缺 Google Drive 套件。請把我提供的 requirements.txt 一起覆蓋後重新部署。'
+    )
+
+last_drive25=st.session_state.get('v3625_last_drive_status',{})
+if last_drive25:
+    if last_drive25.get('ok'):
+        st.success('Drive：'+str(last_drive25.get('message','同步成功')))
+    elif last_drive25.get('configured'):
+        st.warning('Drive：'+str(last_drive25.get('message','同步失敗')))
+
+dc1,dc2,dc3=st.columns(3)
+if dc1.button('🔌 測試 Google Drive 連線',key='v3625_drive_test',use_container_width=True):
+    ok,msg=_v3625_drive_test()
+    if ok: st.success(msg)
+    else: st.error(msg)
+
+if dc2.button('☁️ 立即備份目前帳本到 Drive',key='v3625_drive_upload',use_container_width=True):
+    ok,msg=_v3625_drive_upload_state(state24)
+    if ok: st.success(msg)
+    else: st.error(msg)
+
+if dc3.button('♻️ 從 Drive 還原帳本',key='v3625_drive_restore',use_container_width=True):
+    ds,msg=_v3625_drive_download_state()
+    if isinstance(ds,dict):
+        st.session_state['v3624_state']=ds
+        _v3624_save_state(ds)
+        st.success(msg)
+        st.rerun()
+    else:
+        st.error(msg)
+
+if not cfg25['configured']:
+    st.info(
+        'Google Drive 要由「部署中的 Streamlit App」自動上傳，必須另外設定 Google Drive API / Service Account。'
+        '你剛剛在 ChatGPT 連接的 Google Drive 是 ChatGPT 的連接權限，不會自動傳給 Streamlit Cloud。'
+        '設定完成後，本區的「Drive永久備份」會變成已設定，而且每次封存與同步都會自動覆寫同一份 JSON。'
+    )
 
 # 匯入 / 匯出與帳本初始化
 with st.expander('💾 Forward 帳本備份 / 還原（建議每次同步後下載一份）', expanded=False):
@@ -9516,7 +9814,7 @@ if not led24.empty:
 else:
     st.info('按一次「同步 Forward 帳本」後開始建立每日 MTM 序列。')
 
-st.markdown('### 🧠 60 V3.6.24 前瞻驗證規則')
+st.markdown('### 🧠 60 V3.6.25 前瞻驗證規則')
 rules24=pd.DataFrame([
     {'項目':'策略參數','鎖定值':'Gate D｜90~94＋站上MA200','用途':'禁止 Forward 期間重新挑 Gate'},
     {'項目':'排序','鎖定值':'分數→成交額→近MA200','用途':'同日訊號固定優先順序'},
@@ -9531,7 +9829,7 @@ rules24=pd.DataFrame([
 st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
-    'V3.6.24.1 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
+    'V3.6.25 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
     '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
-    '每次同步後下載 JSON 備份，避免 Streamlit Cloud 重啟造成帳本遺失。'
+    '若已設定 Google Drive，封存與同步後會自動備份到 Drive；JSON 手動下載仍保留作第二層備援。'
 )
