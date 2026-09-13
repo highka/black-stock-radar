@@ -5887,7 +5887,7 @@ def _v3611_locked_validation(events,min_sample=50):
         'events':events,'gate_events':gate
     }
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28｜Forward 健康檢查＋Fail-Closed｜即時優先＋盤後備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28.1｜Health Hotfix｜Forward 健康檢查＋Fail-Closed｜即時優先＋盤後備援')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -6819,17 +6819,34 @@ def _v3624_today_candidates(result_df):
 # - 只做健康保護，不修改 Gate D、排序、N+1、25×3.33%、D40/-12%。
 # ============================================================
 
+def _v3628_num_equal(value, expected, tol=1e-9):
+    """V3.6.28.1：數值正規化比較；0 必須保留，不能被 `or -1` 誤判。"""
+    try:
+        x=pd.to_numeric(value,errors='coerce')
+        if pd.isna(x):
+            return False
+        return abs(float(x)-float(expected))<=tol
+    except Exception:
+        return False
+
+def _v3628_text_norm(value):
+    return re.sub(r'\s+','',str(value or '')).replace('＋','+').replace('→','>').replace('｜','|').lower()
+
 def _v3628_expected_rules_ok(state):
+    """只比對真正影響正式交易的核心參數，並容忍顯示字元/空白差異。"""
     r=(state or {}).get('locked_rules',{}) or {}
+    gate=_v3628_text_norm(r.get('Gate',''))
+    rank=_v3628_text_norm(r.get('rank',''))
+    execution=_v3628_text_norm(r.get('execution',''))
     tests=[
-        str(r.get('Gate',''))=='D｜90~94＋站上MA200',
-        str(r.get('rank',''))=='分數→成交額→近MA200',
-        str(r.get('execution',''))=='N+1開盤',
-        int(pd.to_numeric(r.get('max_positions',-1),errors='coerce') or -1)==V3624_MAX_POS,
-        abs(float(pd.to_numeric(r.get('position_pct',-1),errors='coerce') or -1)-V3624_POS_PCT)<1e-9,
-        int(pd.to_numeric(r.get('queue_days',-1),errors='coerce') or -1)==0,
-        int(pd.to_numeric(r.get('hold_days',-1),errors='coerce') or -1)==V3624_HOLD,
-        abs(float(pd.to_numeric(r.get('hard_stop_pct',-1),errors='coerce') or -1)-V3624_HARD_STOP)<1e-9,
+        ('d' in gate and '90~94' in gate and 'ma200' in gate),
+        ('分數' in rank and '成交額' in rank and 'ma200' in rank),
+        ('n+1' in execution and '開盤' in execution),
+        _v3628_num_equal(r.get('max_positions'),V3624_MAX_POS),
+        _v3628_num_equal(r.get('position_pct'),V3624_POS_PCT),
+        _v3628_num_equal(r.get('queue_days'),0),
+        _v3628_num_equal(r.get('hold_days'),V3624_HOLD),
+        _v3628_num_equal(r.get('hard_stop_pct'),V3624_HARD_STOP),
     ]
     return all(tests)
 
@@ -6862,13 +6879,22 @@ def _v3628_health_snapshot(state, result_df):
                 latest=max(ds) if ds else '未知'
                 add('交易日與技術資料日','🔴 異常',f'預期 {today}，目前最新 {latest}；禁止封存舊訊號。',True,'seal')
 
-    # 2) 官方全市場股票池完整性（寬鬆下限，只抓明顯斷線/縮水）
+    # 2) 官方全市場股票池完整性
+    # V3.6.28.1：休市日若 TPEx 暫時取不到完整市場，不應觸發 Fail-Closed；
+    # 但交易日收盤後仍維持嚴格保護，避免用殘缺股票池封存正式訊號。
     vc=UNIVERSE['市場'].value_counts().to_dict() if UNIVERSE is not None and not UNIVERSE.empty else {}
     lu,otc,esb=int(vc.get('上市',0)),int(vc.get('上櫃',0)),int(vc.get('興櫃',0))
-    uok=(lu>=900 and otc>=700 and esb>=100 and len(UNIVERSE)>=1800)
-    add('全市場股票池','🟢 正常' if uok else '🔴 異常',
-        f'上市 {lu}｜上櫃 {otc}｜興櫃 {esb}｜合計 {len(UNIVERSE) if UNIVERSE is not None else 0}',
-        not uok,'seal' if not uok else '')
+    utotal=len(UNIVERSE) if UNIVERSE is not None else 0
+    uok=(lu>=900 and otc>=700 and esb>=100 and utotal>=1800)
+    udetail=f'上市 {lu}｜上櫃 {otc}｜興櫃 {esb}｜合計 {utotal}'
+    if uok:
+        add('全市場股票池','🟢 正常',udetail,True,'seal')
+    elif is_weekend:
+        add('全市場股票池','🟡 休市日待更新',udetail+'｜休市日不觸發 Fail-Closed；下個交易日封存前必須恢復完整。')
+    elif not after_close:
+        add('全市場股票池','🟡 盤中待確認',udetail+'｜目前不封存；收盤後若仍不完整將自動鎖定。')
+    else:
+        add('全市場股票池','🔴 異常',udetail+'｜收盤後股票池不完整，禁止封存正式訊號。',True,'seal')
 
     # 3) 雷達結果管線
     nres=0 if result_df is None else len(result_df)
@@ -7505,7 +7531,7 @@ c3.metric('成交假設','N+1 開盤')
 c4.metric('出場規則','D40 / -12%')
 
 health28=_v3628_health_snapshot(state24,result if 'result' in globals() else pd.DataFrame())
-st.markdown('### 🩺 每日系統健康檢查')
+st.markdown('### 🩺 每日系統健康檢查｜V3.6.28.1')
 h1,h2,h3,h4=st.columns(4)
 h1.metric('總體狀態',health28['overall'])
 h2.metric('正常',f"{health28['green']} / {len(health28['rows'])}")
