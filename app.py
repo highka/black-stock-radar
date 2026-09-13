@@ -7774,3 +7774,235 @@ if not tr19.empty and px19:
         )
 else:
     st.info('請先完成 V3.6.15 真實 MTM 資料重建；V3.6.19 直接沿用同一批 Gate D 交易與完整日K。')
+
+
+# ============================================================
+# 🧭 V3.6.20 Walk-Forward / 時間切割鎖參數驗證
+# 固定正式規則，不再用測試區間重新最佳化：
+# Gate D / 25檔 / 3.33% / 分數→成交額→近MA200 / queue=0
+# ============================================================
+
+def _v3620_period_stats(ledger, fills, initial_capital):
+    if ledger is None or ledger.empty:
+        return {}
+    z = ledger.sort_values('日期').copy()
+    start_eq = float(initial_capital)
+    end_eq = float(z.iloc[-1]['MTM權益'])
+    total_ret = (end_eq/start_eq - 1) * 100 if start_eq else np.nan
+    days = max((pd.Timestamp(z.iloc[-1]['日期']) - pd.Timestamp(z.iloc[0]['日期'])).days, 1)
+    years = days / 365.25
+    cagr = ((end_eq/start_eq)**(1/years)-1)*100 if start_eq > 0 and end_eq > 0 else np.nan
+    peak = z['MTM權益'].cummax()
+    mdd = float(((z['MTM權益']/peak)-1).min()*100)
+    f = fills.copy() if fills is not None else pd.DataFrame()
+    if not f.empty and '淨損益' in f.columns:
+        gp = float(f.loc[f['淨損益']>0,'淨損益'].sum())
+        gl = float(-f.loc[f['淨損益']<0,'淨損益'].sum())
+        pf = gp/gl if gl > 0 else (np.inf if gp > 0 else 0.0)
+        win = float((f['淨損益']>0).mean()*100)
+    else:
+        pf, win = 0.0, np.nan
+    calmar = cagr/abs(mdd) if np.isfinite(cagr) and mdd < 0 else np.nan
+    return {
+        '總報酬%': total_ret,
+        'CAGR%': cagr,
+        'MTM_MDD%': mdd,
+        'Calmar': calmar,
+        '淨PF': pf,
+        '淨勝率%': win,
+        '完成交易': len(f),
+        '最高持股': int(z['持股檔數'].max()) if '持股檔數' in z else np.nan,
+        '平均持股': float(z['持股檔數'].mean()) if '持股檔數' in z else np.nan,
+        '平均資金使用率%': float(z['資金使用率%'].mean()) if '資金使用率%' in z else np.nan,
+        '最高資金使用率%': float(z['資金使用率%'].max()) if '資金使用率%' in z else np.nan,
+    }
+
+def _v3620_halfyear_label(dt):
+    dt = pd.Timestamp(dt)
+    return f"{dt.year}-H{1 if dt.month <= 6 else 2}"
+
+def _v3620_walkforward(trades, price_map, initial_capital, fee, tax, slip):
+    """
+    真正鎖參數的時間切割：
+    - 不在任何 OOS 區間重新挑 Gate / 持股數 / 部位 / 排序。
+    - 每個半年度獨立以同一初始資金重播，避免前段獲利放大後段結果。
+    - 僅使用該 OOS 半年度『進場日』出現的訊號。
+    """
+    if trades is None or trades.empty:
+        return pd.DataFrame(), {}
+
+    x = trades.copy()
+    x['進場日'] = pd.to_datetime(x['進場日'], errors='coerce').dt.normalize()
+    x = x.dropna(subset=['進場日']).sort_values('進場日')
+    if x.empty:
+        return pd.DataFrame(), {}
+
+    x['WF區間'] = x['進場日'].map(_v3620_halfyear_label)
+    labels = list(dict.fromkeys(x['WF區間'].tolist()))
+    rows = []
+    detail = {}
+
+    for label in labels:
+        g = x[x['WF區間'] == label].copy()
+        if g.empty:
+            continue
+        led, od, fl, pos, st = _v3619_live_book(
+            g.drop(columns=['WF區間'], errors='ignore'),
+            price_map, initial_capital, fee, tax, slip
+        )
+        if led is None or led.empty:
+            continue
+        ps = _v3620_period_stats(led, fl, initial_capital)
+        signal_count = int(st.get('總訊號', 0))
+        accepted = int(st.get('接受訊號', 0))
+        row = {
+            'OOS區間': label,
+            '起始日': pd.Timestamp(g['進場日'].min()).date(),
+            '最後訊號日': pd.Timestamp(g['進場日'].max()).date(),
+            '總訊號': signal_count,
+            '接受訊號': accepted,
+            '承接率%': accepted/signal_count*100 if signal_count else 0,
+            **ps
+        }
+        rows.append(row)
+        detail[label] = {'ledger':led, 'orders':od, 'fills':fl, 'positions':pos, 'stats':st}
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out['正報酬'] = out['總報酬%'] > 0
+        out['PF>1'] = out['淨PF'] > 1
+        out['MDD>-25%'] = out['MTM_MDD%'] >= -25
+        out['Calmar>1'] = out['Calmar'] > 1
+    return out, detail
+
+def _v3620_expanding_oos(trades, price_map, initial_capital, fee, tax, slip):
+    """
+    Expanding Walk-Forward：
+    前面區間只作『已知歷史』標記；正式參數完全鎖死，不用 train 重新最佳化。
+    每個 OOS 半年獨立驗證。
+    """
+    wf, detail = _v3620_walkforward(trades, price_map, initial_capital, fee, tax, slip)
+    if wf.empty:
+        return wf
+    z = wf.copy().reset_index(drop=True)
+    z['先前可見區間數'] = range(len(z))
+    z['是否純OOS'] = z['先前可見區間數'] >= 1
+    return z
+
+st.divider()
+st.subheader('🧭 V3.6.20 Walk-Forward｜鎖參數時間切割驗證')
+st.caption(
+    'V3.6.19.1 已通過帳務與狀態機。V3.6.20 不再改 Gate D、不改 25 檔、不改每筆 3.33%、'
+    '不改排序，也不排隊；只把歷史依半年度切開，逐段用同一套正式規則重播，檢查績效是否只集中在單一時期。'
+)
+
+if 'tr19' in globals() and isinstance(tr19, pd.DataFrame) and not tr19.empty and 'px19' in globals() and px19:
+    wf20, wf20_detail = _v3620_walkforward(tr19, px19, capital, fee, tax, slip)
+    exp20 = _v3620_expanding_oos(tr19, px19, capital, fee, tax, slip)
+
+    if not wf20.empty:
+        st.markdown('### 🏆 ㉟ 半年度 OOS｜固定參數逐段重播')
+        show20 = wf20.copy()
+        st.dataframe(show20.round(4), use_container_width=True, hide_index=True)
+
+        # 真正 OOS：第一段視為形成期，第二段開始才列入正式 OOS 統計
+        oos20 = exp20[exp20['是否純OOS']].copy()
+        st.markdown('### 🧪 ㊱ Expanding Walk-Forward｜第一段形成、後續全為 OOS')
+        st.dataframe(oos20.round(4), use_container_width=True, hide_index=True)
+
+        if not oos20.empty:
+            pos_ratio = float((oos20['總報酬%'] > 0).mean()*100)
+            pf_ratio = float((oos20['淨PF'] > 1).mean()*100)
+            mdd_ratio = float((oos20['MTM_MDD%'] >= -25).mean()*100)
+            calmar_ratio = float((oos20['Calmar'] > 1).mean()*100)
+            worst_mdd = float(oos20['MTM_MDD%'].min())
+            median_ret = float(oos20['總報酬%'].median())
+            median_pf = float(oos20['淨PF'].median())
+            total_oos_trades = int(oos20['完成交易'].sum())
+
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric('OOS正報酬區間%', f'{pos_ratio:.1f}')
+            c2.metric('OOS PF>1區間%', f'{pf_ratio:.1f}')
+            c3.metric('OOS最差MDD%', f'{worst_mdd:.2f}')
+            c4.metric('OOS完成交易', f'{total_oos_trades}')
+
+            c5,c6,c7,c8 = st.columns(4)
+            c5.metric('OOS中位報酬%', f'{median_ret:.2f}')
+            c6.metric('OOS中位PF', f'{median_pf:.2f}')
+            c7.metric('MDD合格區間%', f'{mdd_ratio:.1f}')
+            c8.metric('Calmar>1區間%', f'{calmar_ratio:.1f}')
+
+            st.markdown('### 📋 ㊲ V3.6.20 時間穩健性正式判定')
+            min_segments = 3
+            checks20 = pd.DataFrame([
+                {
+                    '驗證':'至少有3個純OOS半年度',
+                    '結果':f'{len(oos20)} 段',
+                    '通過':len(oos20) >= min_segments
+                },
+                {
+                    '驗證':'至少2/3 OOS區間正報酬',
+                    '結果':f'{pos_ratio:.1f}%',
+                    '通過':pos_ratio >= 66.6667
+                },
+                {
+                    '驗證':'至少2/3 OOS區間 PF>1',
+                    '結果':f'{pf_ratio:.1f}%',
+                    '通過':pf_ratio >= 66.6667
+                },
+                {
+                    '驗證':'所有OOS區間 MDD 不低於 -25%',
+                    '結果':f'最差 {worst_mdd:.2f}%',
+                    '通過':worst_mdd >= -25
+                },
+                {
+                    '驗證':'OOS中位數報酬 > 0',
+                    '結果':f'{median_ret:.2f}%',
+                    '通過':median_ret > 0
+                },
+                {
+                    '驗證':'OOS中位數 PF > 1.20',
+                    '結果':f'{median_pf:.2f}',
+                    '通過':median_pf > 1.20
+                },
+                {
+                    '驗證':'至少2/3 OOS區間 Calmar > 1',
+                    '結果':f'{calmar_ratio:.1f}%',
+                    '通過':calmar_ratio >= 66.6667
+                },
+            ])
+            st.dataframe(checks20, use_container_width=True, hide_index=True)
+
+            if bool(checks20['通過'].all()):
+                st.success(
+                    '🟢 V3.6.20 通過：Gate D 正式規則在時間切割後仍具一致性，'
+                    '不是只靠整段資料或單一年份撐起績效。下一版直接進入「訊號日→下一交易日成交 / Look-ahead Bias 壓力測試」。'
+                )
+            else:
+                st.warning(
+                    '🟡 V3.6.20 有時間切割條件未通過。此處不自動調參；先辨識是哪個 OOS 半年度失效，'
+                    '避免為了修漂亮數字重新最佳化正式規則。'
+                )
+
+            # 找最弱 / 最強 OOS 區間
+            weakest = oos20.sort_values(['總報酬%','淨PF'], ascending=[True,True]).head(1)
+            strongest = oos20.sort_values(['總報酬%','淨PF'], ascending=[False,False]).head(1)
+            st.markdown('### 🔬 ㊳ 最弱 / 最強 OOS 區間')
+            compare20 = pd.concat([
+                weakest.assign(角色='最弱OOS'),
+                strongest.assign(角色='最強OOS')
+            ], ignore_index=True)
+            cols20 = ['角色','OOS區間','總報酬%','CAGR%','MTM_MDD%','Calmar','淨PF','淨勝率%','完成交易','承接率%']
+            st.dataframe(compare20[cols20].round(4), use_container_width=True, hide_index=True)
+
+        st.download_button(
+            '⬇️ 下載 V3.6.20 Walk-Forward 半年度結果',
+            wf20.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.20_walkforward_halfyear.csv',
+            'text/csv',
+            key='dl_v3620_wf'
+        )
+    else:
+        st.warning('V3.6.20 無法建立半年度 Walk-Forward 結果，請確認 V3.6.19.1 交易資料日期。')
+else:
+    st.info('請先完成 V3.6.19.1；V3.6.20 直接沿用同一批正式 Gate D 交易與完整日K。')
