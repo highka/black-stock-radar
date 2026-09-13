@@ -8006,3 +8006,330 @@ if 'tr19' in globals() and isinstance(tr19, pd.DataFrame) and not tr19.empty and
         st.warning('V3.6.20 無法建立半年度 Walk-Forward 結果，請確認 V3.6.19.1 交易資料日期。')
 else:
     st.info('請先完成 V3.6.19.1；V3.6.20 直接沿用同一批正式 Gate D 交易與完整日K。')
+
+
+# ============================================================
+# 🛡️ V3.6.21 Look-ahead Bias 壓力測試
+# 正式策略完全鎖定：
+# Gate D / 25檔 / 3.33% / 分數→成交額→近MA200 / 不排隊
+#
+# 唯一改變：訊號在「訊號日收盤後」才視為成立，
+# 因此不再允許用訊號日收盤成交。
+# 比較：
+# A. 原基準：訊號日收盤成交
+# B. N+1 開盤成交（主要實盤壓力測試）
+# C. N+1 收盤成交（更保守壓力測試）
+# 出場仍固定 D40 / 盤中硬停損12%，並從新的實際進場日起重建。
+# ============================================================
+
+def _v3621_next_trade_date(df, signal_date):
+    if df is None or df.empty:
+        return None
+    idx = pd.DatetimeIndex(df.index).normalize()
+    s = pd.Timestamp(signal_date).normalize()
+    pos = np.where(idx > s)[0]
+    if len(pos) == 0:
+        return None
+    return pd.Timestamp(idx[int(pos[0])]).normalize()
+
+def _v3621_trade_from_execution(df, entry_date, mode='open',
+                                hard_stop=12, hold=40):
+    """從真正可成交的 N+1 日期重建交易。
+    mode=open  : N+1 開盤進場；當日 Low 即開始檢查 -12% 硬停損。
+    mode=close : N+1 收盤進場；硬停損從下一交易日開始檢查。
+    時間出場均以進場日起第40個交易日收盤。
+    """
+    if df is None or df.empty:
+        return None
+    d = df.copy()
+    idx = pd.DatetimeIndex(d.index).normalize()
+    dt = pd.Timestamp(entry_date).normalize()
+    loc = np.where(idx == dt)[0]
+    if len(loc) == 0:
+        return None
+    i = int(loc[-1])
+    if i >= len(d)-1:
+        return None
+
+    col = 'Open' if mode == 'open' else 'Close'
+    if col not in d.columns:
+        return None
+    entry = pd.to_numeric(d[col].iloc[i], errors='coerce')
+    if pd.isna(entry) or not np.isfinite(float(entry)) or float(entry) <= 0:
+        return None
+    entry = float(entry)
+
+    end = min(i + int(hold), len(d)-1)
+    stop_price = entry * (1-hard_stop/100)
+    stop_start = i if mode == 'open' else i+1
+
+    for j in range(stop_start, end+1):
+        low = pd.to_numeric(d['Low'].iloc[j], errors='coerce')
+        if pd.notna(low) and float(low) <= stop_price:
+            return {
+                '進場日':pd.Timestamp(d.index[i]).normalize(),
+                '出場日':pd.Timestamp(d.index[j]).normalize(),
+                '進場價':entry,
+                '出場價':stop_price,
+                '報酬%':-float(hard_stop),
+                '持有天數':j-i,
+                '出場原因':f'N+1 {mode.upper()}｜硬停損{hard_stop:g}%'
+            }
+
+    exit_px = pd.to_numeric(d['Close'].iloc[end], errors='coerce')
+    if pd.isna(exit_px) or not np.isfinite(float(exit_px)):
+        return None
+    exit_px = float(exit_px)
+    return {
+        '進場日':pd.Timestamp(d.index[i]).normalize(),
+        '出場日':pd.Timestamp(d.index[end]).normalize(),
+        '進場價':entry,
+        '出場價':exit_px,
+        '報酬%':(exit_px/entry-1)*100,
+        '持有天數':end-i,
+        '出場原因':f'N+1 {mode.upper()}｜D{hold}固定出場'
+    }
+
+def _v3621_shift_trades(trades, price_map, mode='open'):
+    """保留原訊號日的 Gate D 分數/排序資訊，只把成交延後到下一交易日。"""
+    if trades is None or trades.empty:
+        return pd.DataFrame(), {'原訊號':0,'成功重建':0,'無下一交易日':0,'缺價格':0}
+
+    rows = []
+    stats = {'原訊號':len(trades),'成功重建':0,'無下一交易日':0,'缺價格':0}
+    for _, r in trades.iterrows():
+        sym = str(r['股票']).zfill(4)
+        d = price_map.get(sym)
+        if d is None or d.empty:
+            stats['缺價格'] += 1
+            continue
+
+        signal_date = pd.Timestamp(r['進場日']).normalize()
+        nd = _v3621_next_trade_date(d, signal_date)
+        if nd is None:
+            stats['無下一交易日'] += 1
+            continue
+
+        tr = _v3621_trade_from_execution(d, nd, mode=mode, hard_stop=12, hold=40)
+        if tr is None:
+            stats['缺價格'] += 1
+            continue
+
+        rr = r.to_dict()
+        rr['原始訊號日_V3621'] = signal_date
+        rr['進場日'] = pd.Timestamp(tr['進場日']).normalize()
+        rr['資金出場日'] = pd.Timestamp(tr['出場日']).normalize()
+        rr['重建進場價'] = float(tr['進場價'])
+        rr['重建出場價'] = float(tr['出場價'])
+        rr['重建毛報酬%'] = float(tr['報酬%'])
+        rr['重建出場原因'] = str(tr['出場原因'])
+        rr['持有交易日'] = int(tr['持有天數'])
+        rr['V3621成交模式'] = 'N+1開盤' if mode == 'open' else 'N+1收盤'
+        rows.append(rr)
+        stats['成功重建'] += 1
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(['進場日','技術分數'], ascending=[True,False]).reset_index(drop=True)
+    return out, stats
+
+def _v3621_run_case(label, trades, price_map, initial_capital, fee, tax, slip):
+    led, od, fl, pos, stx = _v3619_live_book(
+        trades, price_map, initial_capital, fee, tax, slip
+    )
+    m = _v3620_period_stats(led, fl, initial_capital)
+    return {
+        '成交假設':label,
+        **m,
+        '總訊號':int(stx.get('總訊號',0)),
+        '接受訊號':int(stx.get('接受訊號',0)),
+        '槽位拒絕':int(stx.get('槽位拒絕',0)),
+        '同股去重':int(stx.get('同股去重',0)),
+        '資金拒絕':int(stx.get('資金拒絕',0)),
+    }, (led,od,fl,pos,stx)
+
+def _v3621_yearly(case_label, fills, ledger, initial_capital):
+    if fills is None or fills.empty or ledger is None or ledger.empty:
+        return pd.DataFrame()
+    f = fills.copy()
+    f['出場日'] = pd.to_datetime(f['出場日'])
+    l = ledger.copy()
+    l['日期'] = pd.to_datetime(l['日期'])
+    rows = []
+    for y in sorted(l['日期'].dt.year.unique()):
+        ly = l[l['日期'].dt.year == y].copy()
+        fy = f[f['出場日'].dt.year == y].copy()
+        if ly.empty:
+            continue
+        # 年度報酬採該年第一個帳本權益為基準，避免把跨年本金誤當固定100萬。
+        start_eq = float(ly.iloc[0]['MTM權益'])
+        end_eq = float(ly.iloc[-1]['MTM權益'])
+        ret = (end_eq/start_eq-1)*100 if start_eq else np.nan
+        peak = ly['MTM權益'].cummax()
+        mdd = float(((ly['MTM權益']/peak)-1).min()*100)
+        gp = float(fy.loc[fy['淨損益']>0,'淨損益'].sum()) if not fy.empty else 0
+        gl = float(-fy.loc[fy['淨損益']<0,'淨損益'].sum()) if not fy.empty else 0
+        pf = gp/gl if gl>0 else (np.inf if gp>0 else 0)
+        rows.append({
+            '成交假設':case_label,'年度':int(y),'年度報酬%':ret,'年度MDD%':mdd,
+            '淨PF':pf,'完成交易':len(fy),
+            '淨勝率%':float((fy['淨損益']>0).mean()*100) if not fy.empty else np.nan
+        })
+    return pd.DataFrame(rows)
+
+st.divider()
+st.subheader('🛡️ V3.6.21 Look-ahead Bias｜下一交易日成交壓力測試')
+st.caption(
+    'V3.6.20 的 66.7% 邊界顯示曾因浮點數門檻被誤判；本版判定改用「通過段數 / 總段數」整數計數。'
+    '策略參數仍完全鎖定。核心問題只有一個：若 Gate D 訊號必須等收盤後才確認，改成下一交易日才成交，優勢還剩多少？'
+)
+
+if 'tr19' in globals() and isinstance(tr19, pd.DataFrame) and not tr19.empty and 'px19' in globals() and px19:
+    # 修正 V3.6.20 的 2/3 浮點邊界判斷
+    wf21, _ = _v3620_walkforward(tr19, px19, capital, fee, tax, slip)
+    exp21 = _v3620_expanding_oos(tr19, px19, capital, fee, tax, slip)
+    pure21 = exp21[exp21['是否純OOS']].copy() if not exp21.empty else pd.DataFrame()
+    if not pure21.empty:
+        nseg = len(pure21)
+        need = int(np.ceil(nseg * 2/3))
+        positive_n = int((pure21['總報酬%'] > 0).sum())
+        pf_n = int((pure21['淨PF'] > 1).sum())
+        calmar_n = int((pure21['Calmar'] > 1).sum())
+        st.info(
+            f'🔧 V3.6.20 邊界修正：純OOS共 {nseg} 段，2/3門檻應為至少 {need} 段。'
+            f'正報酬 {positive_n}/{nseg}、PF>1 {pf_n}/{nseg}、Calmar>1 {calmar_n}/{nseg}。'
+        )
+
+    next_open, rebuild_open = _v3621_shift_trades(tr19, px19, mode='open')
+    next_close, rebuild_close = _v3621_shift_trades(tr19, px19, mode='close')
+
+    base_row, base_pack = _v3621_run_case(
+        '基準｜訊號日收盤', tr19, px19, capital, fee, tax, slip
+    )
+    open_row, open_pack = _v3621_run_case(
+        '主要壓測｜N+1開盤', next_open, px19, capital, fee, tax, slip
+    )
+    close_row, close_pack = _v3621_run_case(
+        '保守壓測｜N+1收盤', next_close, px19, capital, fee, tax, slip
+    )
+
+    pk21 = pd.DataFrame([base_row, open_row, close_row])
+    b = pk21.iloc[0]
+    for c in ['總報酬%','CAGR%','MTM_MDD%','Calmar','淨PF','淨勝率%']:
+        pk21[f'{c}差異'] = pk21[c] - b[c]
+
+    st.markdown('### 🏆 ㊴ 三種成交時點 PK')
+    cols = [
+        '成交假設','總報酬%','CAGR%','MTM_MDD%','Calmar','淨PF','淨勝率%',
+        '完成交易','最高持股','平均持股','平均資金使用率%','最高資金使用率%',
+        'CAGR%差異','MTM_MDD%差異','Calmar差異','淨PF差異'
+    ]
+    st.dataframe(pk21[cols].round(4), use_container_width=True, hide_index=True)
+
+    st.markdown('### 🔄 ㊵ N+1 訊號重建完整度')
+    rebuild_df = pd.DataFrame([
+        {'模式':'N+1開盤', **rebuild_open},
+        {'模式':'N+1收盤', **rebuild_close},
+    ])
+    rebuild_df['重建率%'] = np.where(
+        rebuild_df['原訊號']>0,
+        rebuild_df['成功重建']/rebuild_df['原訊號']*100, 0
+    )
+    st.dataframe(rebuild_df.round(4), use_container_width=True, hide_index=True)
+
+    # 年度壓測
+    yr21 = pd.concat([
+        _v3621_yearly('基準｜訊號日收盤', base_pack[2], base_pack[0], capital),
+        _v3621_yearly('N+1開盤', open_pack[2], open_pack[0], capital),
+        _v3621_yearly('N+1收盤', close_pack[2], close_pack[0], capital),
+    ], ignore_index=True)
+    st.markdown('### 📅 ㊶ 成交延遲年度穩定度')
+    st.dataframe(yr21.round(4), use_container_width=True, hide_index=True)
+
+    # 正式判定：以 N+1 開盤為主要實盤假設
+    op = open_row
+    base_cagr = float(base_row.get('CAGR%', np.nan))
+    op_cagr = float(op.get('CAGR%', np.nan))
+    cagr_keep = op_cagr/base_cagr*100 if np.isfinite(base_cagr) and base_cagr>0 else np.nan
+    base_pf = float(base_row.get('淨PF', np.nan))
+    op_pf = float(op.get('淨PF', np.nan))
+    op_mdd = float(op.get('MTM_MDD%', np.nan))
+    op_calmar = float(op.get('Calmar', np.nan))
+    op_trades = int(op.get('完成交易',0))
+
+    yop = yr21[yr21['成交假設']=='N+1開盤'].copy()
+    pos_years = int((yop['年度報酬%']>0).sum()) if not yop.empty else 0
+    year_need = int(np.ceil(len(yop)*2/3)) if len(yop) else 999
+
+    checks21 = pd.DataFrame([
+        {'驗證':'N+1開盤 CAGR 仍為正','結果':f'{op_cagr:.2f}%','通過':op_cagr>0},
+        {'驗證':'N+1開盤保留至少60%原CAGR','結果':f'{cagr_keep:.1f}%','通過':cagr_keep>=60},
+        {'驗證':'N+1開盤淨PF ≥ 1.50','結果':f'{op_pf:.2f}','通過':op_pf>=1.50},
+        {'驗證':'N+1開盤真正MTM MDD ≥ -25%','結果':f'{op_mdd:.2f}%','通過':op_mdd>=-25},
+        {'驗證':'N+1開盤 Calmar ≥ 1.50','結果':f'{op_calmar:.2f}','通過':op_calmar>=1.50},
+        {'驗證':'N+1開盤完成交易 ≥ 250','結果':f'{op_trades} 筆','通過':op_trades>=250},
+        {'驗證':'至少2/3年度 N+1開盤正報酬',
+         '結果':f'{pos_years}/{len(yop)} 年','通過':pos_years>=year_need},
+    ])
+
+    st.markdown('### 🧠 ㊷ V3.6.21 Look-ahead 正式判定')
+    st.dataframe(checks21, use_container_width=True, hide_index=True)
+
+    if bool(checks21['通過'].all()):
+        st.success(
+            '🟢 V3.6.21 通過：把成交延後到下一交易日開盤後，策略仍保有足夠風險調整後優勢。'
+            '這代表原本績效不是主要靠「訊號日收盤同價成交」的前視偏誤撐起。'
+        )
+    else:
+        st.warning(
+            '🟡 V3.6.21 有條件未通過：先不要改 Gate D 或資金參數。'
+            '應先判斷績效衰退來自隔夜跳空、延後一天錯過行情，或特定年度。'
+        )
+
+    # 隔夜成交價格偏移診斷
+    diag_rows = []
+    base_map = tr19.copy()
+    base_map['股票'] = base_map['股票'].astype(str).str.zfill(4)
+    base_map['原始訊號日_V3621'] = pd.to_datetime(base_map['進場日']).dt.normalize()
+    base_map['_key'] = base_map['股票'] + '|' + base_map['原始訊號日_V3621'].astype(str)
+    for mode_name, z in [('N+1開盤',next_open),('N+1收盤',next_close)]:
+        if z is None or z.empty:
+            continue
+        zz = z.copy()
+        zz['股票'] = zz['股票'].astype(str).str.zfill(4)
+        zz['_key'] = zz['股票'] + '|' + pd.to_datetime(zz['原始訊號日_V3621']).dt.normalize().astype(str)
+        bm = base_map[['_key','重建進場價']].rename(columns={'重建進場價':'訊號日收盤價'})
+        mm = zz.merge(bm,on='_key',how='left')
+        mm['成交價偏移%'] = (
+            pd.to_numeric(mm['重建進場價'],errors='coerce') /
+            pd.to_numeric(mm['訊號日收盤價'],errors='coerce') - 1
+        )*100
+        s = mm['成交價偏移%'].replace([np.inf,-np.inf],np.nan).dropna()
+        if len(s):
+            diag_rows.append({
+                '模式':mode_name,'樣本':len(s),
+                '平均成交價偏移%':s.mean(),'中位成交價偏移%':s.median(),
+                'P90偏移%':s.quantile(.90),'P10偏移%':s.quantile(.10),
+                '上漲跳空比例%':(s>0).mean()*100
+            })
+    st.markdown('### 🌙 ㊸ 隔夜 / 延遲成交價格偏移')
+    if diag_rows:
+        st.dataframe(pd.DataFrame(diag_rows).round(4), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        '⬇️ 下載 V3.6.21 成交時點 PK',
+        pk21.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        'V3.6.21_execution_timing_PK.csv',
+        'text/csv',
+        key='dl_v3621_pk'
+    )
+    if not yr21.empty:
+        st.download_button(
+            '⬇️ 下載 V3.6.21 年度成交壓測',
+            yr21.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.21_execution_yearly.csv',
+            'text/csv',
+            key='dl_v3621_year'
+        )
+else:
+    st.info('請先完成 V3.6.19.1 正式帳本；V3.6.21 會沿用同一批 Gate D 訊號與完整日K。')
