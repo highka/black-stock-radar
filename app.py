@@ -6396,7 +6396,7 @@ def _v3615_candidate_grid(trades,price_map,capital,fee,tax,slip):
 
 
 # ============================================================
-# 🧹 V3.6.26 正式 Forward 精簡版
+# 📊 V3.6.27 Forward 實戰儀表板版
 # 已完成並封存的歷史研究介面（V3.6.14 ~ V3.6.23）不再於正式 App 顯示或執行。
 # 正式參數維持鎖定：Gate D 90~94 + MA200 / N+1 Open / 25 x 3.33% / queue=0 / D40 / -12% hard stop。
 # ============================================================
@@ -6869,6 +6869,59 @@ def _v3624_metrics(state):
             out['PF']=gp/gl if gl>0 else np.inf
     return out
 
+def _v3627_dashboard_snapshot(state):
+    """V3.6.27：把 Forward 帳本整理成每日實戰儀表板所需的單一快照。"""
+    eq, mv = _v3624_current_equity(state)
+    cash = float(state.get('cash', 0) or 0)
+    positions = state.get('positions', {}) or {}
+    fills = pd.DataFrame(state.get('fills', []))
+    orders = pd.DataFrame(state.get('orders', []))
+    initial = float(state.get('initial_capital', V3624_INITIAL_CAPITAL) or V3624_INITIAL_CAPITAL)
+
+    realized = 0.0
+    if not fills.empty and '淨損益' in fills.columns:
+        realized = float(pd.to_numeric(fills['淨損益'], errors='coerce').fillna(0).sum())
+
+    invested_cost = 0.0
+    unrealized = 0.0
+    for sym, p in positions.items():
+        cost = float(p.get('entry_total_cost', 0) or 0)
+        invested_cost += cost
+        d = _v3624_stock_df(sym, p.get('market', ''))
+        px = _v3624_price_on_or_before(d, taiwan_now().date(), 'Close')
+        if not np.isfinite(px):
+            px = _v3624_num(p.get('last_px'), p.get('entry_raw', np.nan))
+        if np.isfinite(px):
+            unrealized += float(p.get('shares', 0) or 0) * float(px) - cost
+
+    accepted = rejected_slot = rejected_cash = rejected_dup = 0
+    if not orders.empty and '結果' in orders.columns:
+        vc = orders['結果'].astype(str).value_counts()
+        accepted = int(vc.get('ACCEPTED_OPEN', 0))
+        rejected_slot = int(vc.get('REJECTED_SLOT', 0))
+        rejected_cash = int(vc.get('REJECTED_CASH', 0))
+        rejected_dup = int(vc.get('REJECTED_DUPLICATE', 0))
+
+    pos_n = len(positions)
+    slots = max(V3624_MAX_POS - pos_n, 0)
+    utilization = (mv / eq * 100) if eq > 0 else np.nan
+    cash_pct = (cash / eq * 100) if eq > 0 else np.nan
+    total_pnl = eq - initial
+    total_pnl_pct = total_pnl / initial * 100 if initial > 0 else np.nan
+
+    metrics = _v3624_metrics(state)
+    return {
+        '權益': eq, '現金': cash, '持倉市值': mv, '投入成本': invested_cost,
+        '已實現損益': realized, '未實現損益': unrealized,
+        '總損益': total_pnl, '總損益%': total_pnl_pct,
+        '持股數': pos_n, '可用槽位': slots, '資金使用率%': utilization, '現金比率%': cash_pct,
+        '待成交': len(state.get('pending', []) or []), '已封存訊號': len(state.get('signals', []) or []),
+        '完成交易': int(metrics.get('完成交易', 0) or 0), '運行天數': int(metrics.get('天數', 0) or 0),
+        'PF': metrics.get('PF', np.nan), '勝率%': metrics.get('勝率%', np.nan),
+        'MDD%': metrics.get('MDD%', np.nan), 'CAGR%': metrics.get('CAGR%', np.nan),
+        '接受開倉': accepted, '槽位拒絕': rejected_slot, '資金拒絕': rejected_cash, '重複拒絕': rejected_dup,
+    }
+
 def _v3624_forward_status(m):
     """早期樣本不夠時只做監控，不做策略生死判決。"""
     n=int(m.get('完成交易',0) or 0)
@@ -7189,8 +7242,8 @@ def _v36251_drive_test():
 
 
 st.divider()
-st.subheader('☁️ V3.6.26 Forward Test / Paper Trading｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.26｜正式 Forward 精簡版＋Drive 自動還原＋Revision 防覆寫＋最近30版雲端備份')
+st.subheader('📊 V3.6.27 Forward 實戰儀表板｜Google Drive 防覆寫安全帳本')
+st.success('✅ Build：V3.6.27｜Forward 實戰儀表板＋Drive 自動還原＋Revision 防覆寫＋最近30版雲端備份')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7347,22 +7400,55 @@ if b2.button('🔄 同步 Forward 帳本 / N+1成交 / MTM',key='v3624_sync',use
 m24=_v3624_metrics(state24)
 status24,status_text24=_v3624_forward_status(m24)
 
-st.markdown('### 📒 55 Forward 即時帳本')
-a,b,c,d,e,f=st.columns(6)
-a.metric('已封存訊號',len(state24.get('signals',[])))
-b.metric('待 N+1 成交',len(state24.get('pending',[])))
-c.metric('目前持股',len(state24.get('positions',{})))
-d.metric('完成交易',m24['完成交易'])
-e.metric('現金',f"{float(state24.get('cash',0)):,.0f}")
-eq24,_mv24=_v3624_current_equity(state24)
-f.metric('目前 MTM 權益',f'{eq24:,.0f}')
+st.markdown('### 🎛️ Forward 實戰總覽')
+dash27=_v3627_dashboard_snapshot(state24)
+
+r1c1,r1c2,r1c3,r1c4,r1c5,r1c6=st.columns(6)
+r1c1.metric('MTM 總權益',f"{dash27['權益']:,.0f}",f"{dash27['總損益%']:+.2f}%" if pd.notna(dash27['總損益%']) else None)
+r1c2.metric('現金',f"{dash27['現金']:,.0f}",f"{dash27['現金比率%']:.1f}%" if pd.notna(dash27['現金比率%']) else None)
+r1c3.metric('持倉市值',f"{dash27['持倉市值']:,.0f}",f"使用 {dash27['資金使用率%']:.1f}%" if pd.notna(dash27['資金使用率%']) else None)
+r1c4.metric('目前持股',f"{dash27['持股數']} / {V3624_MAX_POS}",f"可用 {dash27['可用槽位']} 槽")
+r1c5.metric('待 N+1 成交',dash27['待成交'])
+r1c6.metric('完成交易',dash27['完成交易'])
+
+r2c1,r2c2,r2c3,r2c4,r2c5,r2c6=st.columns(6)
+r2c1.metric('已實現損益',f"{dash27['已實現損益']:+,.0f}")
+r2c2.metric('未實現損益',f"{dash27['未實現損益']:+,.0f}")
+r2c3.metric('Forward PF',f"{dash27['PF']:.2f}" if pd.notna(dash27['PF']) and np.isfinite(dash27['PF']) else '累積中')
+r2c4.metric('Forward 勝率',f"{dash27['勝率%']:.1f}%" if pd.notna(dash27['勝率%']) else '累積中')
+r2c5.metric('MTM MDD',f"{dash27['MDD%']:.2f}%" if pd.notna(dash27['MDD%']) else '累積中')
+r2c6.metric('運行天數',dash27['運行天數'])
+
+slot_ratio=min(max(dash27['持股數']/V3624_MAX_POS,0),1)
+capital_ratio=min(max((dash27['資金使用率%'] if pd.notna(dash27['資金使用率%']) else 0)/100,0),1)
+sample_days=min(dash27['運行天數']/60,1)
+sample_trades=min(dash27['完成交易']/30,1)
+
+p1,p2=st.columns(2)
+with p1:
+    st.caption(f"槽位使用：{dash27['持股數']}/{V3624_MAX_POS}｜正式名目曝險上限 {V3624_MAX_POS*V3624_POS_PCT:.2f}%")
+    st.progress(slot_ratio)
+    st.caption(f"實際資金使用率：{dash27['資金使用率%']:.1f}%｜現金比率：{dash27['現金比率%']:.1f}%" if pd.notna(dash27['資金使用率%']) else '尚無可計算的資金使用率')
+    st.progress(capital_ratio)
+with p2:
+    st.caption(f"Forward 觀察天數：{dash27['運行天數']}/60")
+    st.progress(sample_days)
+    st.caption(f"完成交易樣本：{dash27['完成交易']}/30")
+    st.progress(sample_trades)
 
 st.caption(
     f"帳本建立：{state24.get('created_at','')}｜最後同步：{state24.get('last_sync','尚未同步')}｜"
-    f"成本：手續費 {fee24:g}% / 賣出稅 {tax24:g}% / 單邊滑價 {slip24:g}%"
+    f"成本：手續費 {fee24:g}% / 賣出稅 {tax24:g}% / 單邊滑價 {slip24:g}%｜"
+    f"已封存訊號 {dash27['已封存訊號']}｜接受開倉 {dash27['接受開倉']}｜"
+    f"槽位拒絕 {dash27['槽位拒絕']}｜資金拒絕 {dash27['資金拒絕']}｜重複拒絕 {dash27['重複拒絕']}"
 )
 
-st.markdown('### 📊 56 Forward 績效 vs 歷史 / Monte Carlo')
+if dash27['運行天數'] < 60 or dash27['完成交易'] < 30:
+    st.info(f"🧪 Forward 仍在累積期：目前 {dash27['運行天數']} 日 / {dash27['完成交易']} 筆完成交易。正式偏離判定門檻為至少 60 日＋30 筆。")
+else:
+    st.success('✅ Forward 已達正式觀察最低樣本：可開始搭配 PF、MDD 與歷史基準判讀是否偏離。')
+
+st.markdown('### 📊 Forward 績效 vs 歷史基準')
 cmp24=pd.DataFrame([
     {'基準':'歷史正式回測','CAGR%':V3624_BACKTEST_CAGR,'MDD%':V3624_BACKTEST_MDD,'PF':V3624_BACKTEST_PF},
     {'基準':'Monte Carlo P10','CAGR%':V3624_MC_P10_CAGR,'MDD%':V3624_MC_P10_MDD,'PF':V3624_MC_P10_PF},
@@ -7386,7 +7472,7 @@ elif status24.startswith('🟡') or status24.startswith('🟠'):
 else:
     st.error(f'{status24}｜{status_text24}')
 
-st.markdown('### 🧾 57 Forward 訂單生命週期')
+st.markdown('### 🧾 Forward 訂單生命週期')
 od24=pd.DataFrame(state24.get('orders',[]))
 if od24.empty:
     st.info('目前尚無 Forward 訂單事件。先在交易日收盤後封存 Gate D 訊號。')
@@ -7398,7 +7484,7 @@ else:
         'V3.6.24_forward_orders.csv','text/csv',key='v3624_dl_orders'
     )
 
-st.markdown('### 💼 58 Forward 持股 / 已完成交易')
+st.markdown('### 💼 Forward 持股 / 已完成交易')
 pos_rows=[]
 for sym,p in state24.get('positions',{}).items():
     d=_v3624_stock_df(sym,p.get('market',''))
@@ -7430,7 +7516,7 @@ if not fl24.empty:
             'V3.6.24_forward_fills.csv','text/csv',key='v3624_dl_fills'
         )
 
-st.markdown('### 📈 59 Forward 每日 MTM 權益')
+st.markdown('### 📈 Forward 每日 MTM 權益')
 led24=pd.DataFrame(state24.get('ledger',[]))
 if not led24.empty:
     led24['日期']=pd.to_datetime(led24['日期'],errors='coerce')
@@ -7460,7 +7546,7 @@ rules24=pd.DataFrame([
 st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
-    'V3.6.26 的目的不是再找更漂亮的歷史數字，而是從部署日起留下不可回寫的 Forward 證據。'
+    'V3.6.27 的目的不是再找更漂亮的歷史數字，而是把每天真正需要看的 Forward 資金、持倉、損益、風險與樣本進度集中在同一個實戰儀表板。'
     '建議交易日收盤後先按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
     'OAuth 設定完成後，每次封存與同步會自動備份到 Google Drive；手動 JSON 下載仍保留作第二層備援。'
 )
