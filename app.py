@@ -7328,7 +7328,7 @@ else:
 
 
 # ============================================================
-# 📒 V3.6.19 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本
+# 📒 V3.6.19.1 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本
 # V3.6.18 正式結論：
 #   1) 不排隊（queue=0）
 #   2) Gate D = 90~94 + 站上MA200
@@ -7460,7 +7460,13 @@ def _v3619_live_book(trades, price_map, initial_capital,
                 })
                 continue
 
-            entry_raw = float(r['進場價'])
+            # V3.6.19.1：沿用 V3.6.15 真實MTM重建欄位。
+            # 優先讀「重建進場價」，舊欄位僅作相容備援。
+            entry_raw = pd.to_numeric(
+                r.get('重建進場價', r.get('進場價', np.nan)),
+                errors='coerce'
+            )
+            entry_raw = float(entry_raw) if pd.notna(entry_raw) else np.nan
             if not np.isfinite(entry_raw) or entry_raw <= 0:
                 reject_price += 1
                 orders.append({
@@ -7490,15 +7496,33 @@ def _v3619_live_book(trades, price_map, initial_capital,
             entry_total_cost = shares*unit_cost
             cash -= entry_total_cost
 
+            exit_price_val = pd.to_numeric(
+                r.get('重建出場價', r.get('出場價', np.nan)),
+                errors='coerce'
+            )
+            exit_date_val = pd.to_datetime(
+                r.get('資金出場日', pd.NaT),
+                errors='coerce'
+            )
+            if pd.isna(exit_price_val) or pd.isna(exit_date_val):
+                reject_price += 1
+                orders.append({
+                    '日期':dt,'股票':sym,'事件':'NEW_SIGNAL','結果':'REJECTED_BAD_EXIT_DATA',
+                    '原因':'缺少重建出場價或資金出場日','技術分數':score,
+                    '持倉數_事件前':len(open_pos),'現金_事件後':cash
+                })
+                continue
+
             open_pos[sym] = {
                 '股票':sym,'名稱':r.get('名稱',''),
                 'signal_date':dt,'entry_date':dt,
-                'exit_date':pd.Timestamp(r['資金出場日']).normalize(),
+                'exit_date':pd.Timestamp(exit_date_val).normalize(),
                 'entry_raw':entry_raw,'entry_exec':entry_exec,
                 'entry_total_cost':entry_total_cost,'shares':shares,
-                'exit_price':float(r['出場價']),
-                'reason':str(r.get('出場原因','')),
-                'hold':int(r.get('持有交易日',40)),
+                # V3.6.19.1：V3.6.15 重建交易真正使用的欄位名稱
+                'exit_price':float(exit_price_val),
+                'reason':str(r.get('重建出場原因', r.get('出場原因',''))),
+                'hold':int(pd.to_numeric(r.get('持有交易日',40),errors='coerce') or 40),
                 'score':score,'last_px':entry_raw
             }
             accepted += 1
@@ -7639,13 +7663,23 @@ def _v3619_yearly(ledger, fills):
     return pd.DataFrame(rows)
 
 st.divider()
-st.subheader('📒 V3.6.19 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本')
+st.subheader('📒 V3.6.19.1 實盤訂單生命週期 / 訊號去重 / 每日持倉帳本')
 st.caption('V3.6.18 已正式淘汰排隊：queue=0。現在固定 Gate D、25檔、每筆3.33%、分數→成交額→近MA200；只驗證實盤狀態機與帳務一致性，不再調策略參數。')
 
 tr19 = st.session_state.get('v3615_trades', pd.DataFrame())
 px19 = st.session_state.get('v3615_prices', {})
 
 if not tr19.empty and px19:
+    required_cols_3619 = ['股票','進場日','資金出場日','重建進場價','重建出場價','重建出場原因','持有交易日']
+    missing_cols_3619 = [c for c in required_cols_3619 if c not in tr19.columns]
+    if missing_cols_3619:
+        st.error('V3.6.19.1 資料契約檢查失敗：缺少欄位 ' + '、'.join(missing_cols_3619))
+        st.stop()
+    with st.expander('🔎 V3.6.19.1 交易資料欄位診斷', expanded=False):
+        st.write('交易筆數：', len(tr19))
+        st.write('必要欄位：', required_cols_3619)
+        st.write('實際欄位：', list(tr19.columns))
+
     led19,ord19,fill19,pos19,stat19 = _v3619_live_book(
         tr19, px19, capital, fee, tax, slip
     )
@@ -7693,7 +7727,7 @@ if not tr19.empty and px19:
             with st.expander('查看最近 500 筆訂單事件'):
                 st.dataframe(ord19.tail(500),use_container_width=True,hide_index=True)
 
-        st.markdown('### 🧠 ㉞ V3.6.19 正式可執行判定')
+        st.markdown('### 🧠 ㉞ V3.6.19.1 正式可執行判定')
         checks19=pd.DataFrame([
             {'驗證':'帳務一致性全部通過','結果':f"{int(rec19['通過'].sum())}/{len(rec19)}",
              '通過':bool(rec19['通過'].all())},
@@ -7714,29 +7748,29 @@ if not tr19.empty and px19:
         st.dataframe(checks19,use_container_width=True,hide_index=True)
 
         if bool(checks19['通過'].all()):
-            st.success('🟢 V3.6.19 通過：選股、槽位、資金、去重、進出場與每日 MTM 帳本可一致重播。下一階段可進入「Walk-Forward / 時間切割鎖參數」驗證，確認不是整段資料最佳化造成的結果。')
+            st.success('🟢 V3.6.19.1 通過：選股、槽位、資金、去重、進出場與每日 MTM 帳本可一致重播。下一階段可進入「Walk-Forward / 時間切割鎖參數」驗證，確認不是整段資料最佳化造成的結果。')
         else:
-            st.warning('🟡 V3.6.19 尚有實盤帳務或穩健性條件未通過；先不要進 Walk-Forward，應先修正失敗項目。')
+            st.warning('🟡 V3.6.19.1 尚有實盤帳務或穩健性條件未通過；先不要進 Walk-Forward，應先修正失敗項目。')
 
         st.download_button(
-            '⬇️ 下載 V3.6.19 每日帳本',
+            '⬇️ 下載 V3.6.19.1 每日帳本',
             led19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.19_daily_ledger.csv','text/csv',key='dl_v3619_ledger'
+            'V3.6.19.1_daily_ledger.csv','text/csv',key='dl_v3619_ledger'
         )
         st.download_button(
-            '⬇️ 下載 V3.6.19 訂單事件',
+            '⬇️ 下載 V3.6.19.1 訂單事件',
             ord19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.19_order_events.csv','text/csv',key='dl_v3619_orders'
+            'V3.6.19.1_order_events.csv','text/csv',key='dl_v3619_orders'
         )
         st.download_button(
-            '⬇️ 下載 V3.6.19 完成交易',
+            '⬇️ 下載 V3.6.19.1 完成交易',
             fill19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.19_closed_trades.csv','text/csv',key='dl_v3619_fills'
+            'V3.6.19.1_closed_trades.csv','text/csv',key='dl_v3619_fills'
         )
         st.download_button(
-            '⬇️ 下載 V3.6.19 每日持倉明細',
+            '⬇️ 下載 V3.6.19.1 每日持倉明細',
             pos19.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-            'V3.6.19_daily_positions.csv','text/csv',key='dl_v3619_positions'
+            'V3.6.19.1_daily_positions.csv','text/csv',key='dl_v3619_positions'
         )
 else:
     st.info('請先完成 V3.6.15 真實 MTM 資料重建；V3.6.19 直接沿用同一批 Gate D 交易與完整日K。')
