@@ -6484,86 +6484,86 @@ def _v3615_candidate_grid(trades,price_map,capital,fee,tax,slip):
     if not d.empty:d=d.sort_values(['Calmar','淨PF','總報酬%'],ascending=False).reset_index(drop=True)
     return d,packs
 
-    st.divider()
-    st.subheader('🧪 V3.6.14 可行資金容量 / 同時持股壓力測試')
-    st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
+st.divider()
+st.subheader('🧪 V3.6.14 可行資金容量 / 同時持股壓力測試')
+st.caption('Gate D 繼續鎖定 90~94＋站上MA200。本版不改訊號，只把容量上限擴到 40 檔，量測槽位淘汰、訊號承接率、平均/最高持股與資金使用率。')
 
-    if pack:
-        trades=_v3612_prepare_trades(pack['events'])
-        if trades.empty:
-            st.warning('目前沒有可供資金模擬的 Gate D 交易。')
-        else:
-            c1,c2,c3,c4=st.columns(4)
-            capital=c1.number_input('初始資金',min_value=100000,max_value=10000000,value=1000000,step=100000,key='v3612_capital')
-            fee=c2.number_input('單邊手續費%',min_value=0.0,max_value=1.0,value=0.1425,step=0.01,format='%.4f',key='v3612_fee')
-            tax=c3.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='v3612_tax')
-            slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
+if pack:
+    trades=_v3612_prepare_trades(pack['events'])
+    if trades.empty:
+        st.warning('目前沒有可供資金模擬的 Gate D 交易。')
+    else:
+        c1,c2,c3,c4=st.columns(4)
+        capital=c1.number_input('初始資金',min_value=100000,max_value=10000000,value=1000000,step=100000,key='v3612_capital')
+        fee=c2.number_input('單邊手續費%',min_value=0.0,max_value=1.0,value=0.1425,step=0.01,format='%.4f',key='v3612_fee')
+        tax=c3.number_input('賣出交易稅%',min_value=0.0,max_value=1.0,value=0.30,step=0.05,format='%.2f',key='v3612_tax')
+        slip=c4.number_input('單邊滑價%',min_value=0.0,max_value=2.0,value=0.10,step=0.05,format='%.2f',key='v3612_slip')
 
-            grid=_v3613_scenario_grid(trades,capital,fee,tax,slip)
-            st.markdown('### 🏆 ⑪ V3.6.14 可行容量甜蜜點｜5 → 40 檔')
-            st.dataframe(grid,use_container_width=True,hide_index=True)
-            bad_n=int((~grid['配置可行']).sum()) if not grid.empty else 0
-            if bad_n:
-                st.warning(f'容量真偽檢查：{bad_n} 組名目配置超過100%（例如25檔×5%=125%），V3.6.14保留顯示供比較，但不允許它們成為最佳容量。')
+        grid=_v3613_scenario_grid(trades,capital,fee,tax,slip)
+        st.markdown('### 🏆 ⑪ V3.6.14 可行容量甜蜜點｜5 → 40 檔')
+        st.dataframe(grid,use_container_width=True,hide_index=True)
+        bad_n=int((~grid['配置可行']).sum()) if not grid.empty else 0
+        if bad_n:
+            st.warning(f'容量真偽檢查：{bad_n} 組名目配置超過100%（例如25檔×5%=125%），V3.6.14保留顯示供比較，但不允許它們成為最佳容量。')
 
-            if not grid.empty:
-                best=grid[grid['配置可行']].iloc[0]
-                st.success(
-                    f"目前可行容量首選：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:g}%｜名目需求 {best['名目資金需求%']:.1f}%｜"
-                    f"總報酬 {best['總報酬%']:.1f}%｜MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}｜"
-                    f"承接率 {best['訊號承接率%']:.1f}%｜容量淘汰率 {best['容量淘汰率%']:.1f}%"
-                )
-
-            st.markdown('### 🔬 ⑫ 指定容量明細')
-            a,b=st.columns(2)
-            mp=a.select_slider('最大同時持股',[5,10,15,20,25,30,35,40],value=20,key='v3612_mp')
-            pp=b.select_slider('單筆目標資金%',[2.0,2.5,3.0,3.33,4.0,5.0,7.5,10.0],value=5.0,key='v3612_pp')
-            eq,lg,stats=_v3613_simulate(trades,capital,mp,pp,fee,tax,slip)
-
-            s1,s2,s3,s4=st.columns(4)
-            s1.metric('總報酬%',f"{stats['總報酬%']:.2f}")
-            s2.metric('實現權益MDD%',f"{stats['實現權益最大回撤%']:.2f}")
-            s3.metric('完成交易',stats['完成交易'])
-            s4.metric('淨PF',f"{stats['淨PF']:.2f}")
-
-            q1,q2,q3,q4=st.columns(4)
-            q1.metric('實際最高持股',int(stats['實際最高持股']))
-            q2.metric('平均持股數',f"{stats['平均持股數']:.2f}")
-            q3.metric('訊號承接率%',f"{stats['訊號承接率%']:.1f}")
-            q4.metric('容量淘汰率%',f"{stats['容量淘汰率%']:.1f}")
-            r1,r2,r3,r4=st.columns(4)
-            r1.metric('槽位不足淘汰',int(stats['槽位不足淘汰']))
-            r2.metric('資金不足淘汰',int(stats['資金不足淘汰']))
-            r3.metric('平均資金使用率%',f"{stats['平均資金使用率%']:.1f}")
-            r4.metric('最高資金使用率%',f"{stats['最高資金使用率%']:.1f}")
-
-            if not eq.empty:
-                chart=eq.set_index('日期')[['實現權益']]
-                st.line_chart(chart,use_container_width=True)
-            with st.expander('查看交易明細'):
-                st.dataframe(lg,use_container_width=True,hide_index=True)
-
-            st.download_button(
-                '⬇️ 下載 V3.6.14 容量情境',
-                grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                'V3.6.14_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
+        if not grid.empty:
+            best=grid[grid['配置可行']].iloc[0]
+            st.success(
+                f"目前可行容量首選：最多 {int(best['最大同時持股'])} 檔、每檔 {best['單筆目標資金%']:g}%｜名目需求 {best['名目資金需求%']:.1f}%｜"
+                f"總報酬 {best['總報酬%']:.1f}%｜MDD {best['實現權益最大回撤%']:.1f}%｜淨PF {best['淨PF']:.2f}｜"
+                f"承接率 {best['訊號承接率%']:.1f}%｜容量淘汰率 {best['容量淘汰率%']:.1f}%"
             )
-            if not lg.empty:
-                st.download_button(
-                    '⬇️ 下載 V3.6.14 交易明細',
-                    lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
-                    'V3.6.14_capacity_trades.csv','text/csv',key='dl_v3612_trades'
-                )
 
-            st.warning('V3.6.14 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
+        st.markdown('### 🔬 ⑫ 指定容量明細')
+        a,b=st.columns(2)
+        mp=a.select_slider('最大同時持股',[5,10,15,20,25,30,35,40],value=20,key='v3612_mp')
+        pp=b.select_slider('單筆目標資金%',[2.0,2.5,3.0,3.33,4.0,5.0,7.5,10.0],value=5.0,key='v3612_pp')
+        eq,lg,stats=_v3613_simulate(trades,capital,mp,pp,fee,tax,slip)
+
+        s1,s2,s3,s4=st.columns(4)
+        s1.metric('總報酬%',f"{stats['總報酬%']:.2f}")
+        s2.metric('實現權益MDD%',f"{stats['實現權益最大回撤%']:.2f}")
+        s3.metric('完成交易',stats['完成交易'])
+        s4.metric('淨PF',f"{stats['淨PF']:.2f}")
+
+        q1,q2,q3,q4=st.columns(4)
+        q1.metric('實際最高持股',int(stats['實際最高持股']))
+        q2.metric('平均持股數',f"{stats['平均持股數']:.2f}")
+        q3.metric('訊號承接率%',f"{stats['訊號承接率%']:.1f}")
+        q4.metric('容量淘汰率%',f"{stats['容量淘汰率%']:.1f}")
+        r1,r2,r3,r4=st.columns(4)
+        r1.metric('槽位不足淘汰',int(stats['槽位不足淘汰']))
+        r2.metric('資金不足淘汰',int(stats['資金不足淘汰']))
+        r3.metric('平均資金使用率%',f"{stats['平均資金使用率%']:.1f}")
+        r4.metric('最高資金使用率%',f"{stats['最高資金使用率%']:.1f}")
+
+        if not eq.empty:
+            chart=eq.set_index('日期')[['實現權益']]
+            st.line_chart(chart,use_container_width=True)
+        with st.expander('查看交易明細'):
+            st.dataframe(lg,use_container_width=True,hide_index=True)
+
+        st.download_button(
+            '⬇️ 下載 V3.6.14 容量情境',
+            grid.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.14_capacity_scenarios.csv','text/csv',key='dl_v3612_grid'
+        )
+        if not lg.empty:
+            st.download_button(
+                '⬇️ 下載 V3.6.14 交易明細',
+                lg.to_csv(index=False,encoding='utf-8-sig').encode('utf-8-sig'),
+                'V3.6.14_capacity_trades.csv','text/csv',key='dl_v3612_trades'
+            )
+
+        st.warning('V3.6.14 仍使用「實現權益最大回撤」，不是逐日 MTM MDD。本版目標是先找容量甜蜜點；容量鎖定後，下一版再回抓完整日K做逐日Portfolio MDD。')
 
 
 # ============================================================
 # 🧪 V3.6.15 真實逐日 MTM 驗證區
 # ============================================================
 st.divider()
-st.subheader('📈 V3.6.15 真實逐日 MTM Portfolio MDD / 資金曲線')
-st.caption('Gate D 完全不改：90~94＋站上MA200。這一版只修正時間軸並把未實現損益逐日計入權益；同時修正 V3.6.14 事件表缺出場日時以日曆日近似造成的容量誤差。')
+st.subheader('📈 V3.6.15.1 真實逐日 MTM Portfolio MDD / 資金曲線')
+st.caption('V3.6.15.1 修正版｜Gate D 完全不改：90~94＋站上MA200。修正 V3.6.15 容量參數作用域錯誤，並保留真實逐日 MTM 驗證。')
 st.info('請先用 V3.6.14 的完整股票池建立 Gate D 事件，再按下方按鈕。第一次需要重新取得 Gate D 股票的歷史日K；之後會利用 Streamlit 快取。')
 
 if pack:
