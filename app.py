@@ -8333,3 +8333,263 @@ if 'tr19' in globals() and isinstance(tr19, pd.DataFrame) and not tr19.empty and
         )
 else:
     st.info('請先完成 V3.6.19.1 正式帳本；V3.6.21 會沿用同一批 Gate D 訊號與完整日K。')
+
+
+# ============================================================
+# V3.6.22 Capital Allocation Robustness
+# 正式成交假設改採 V3.6.21 已通過的 N+1 開盤。
+# 不改 Gate D、不改排序、不排隊；只驗證「最大持股數 × 單筆資金%」。
+# ============================================================
+
+def _v3622_run_allocation(trades, price_map, initial_capital,
+                          max_pos, pos_pct, fee_pct, tax_pct, slippage_pct):
+    """沿用 V3.6.19.1 正式帳本，但暫時替換容量參數；執行後立即還原全域設定。"""
+    global V3619_MAX_POS, V3619_POS_PCT
+    old_max = V3619_MAX_POS
+    old_pct = V3619_POS_PCT
+    try:
+        V3619_MAX_POS = int(max_pos)
+        V3619_POS_PCT = float(pos_pct)
+        led, od, fl, pos, stx = _v3619_live_book(
+            trades, price_map, initial_capital,
+            fee_pct, tax_pct, slippage_pct
+        )
+        met = _v3620_period_stats(led, fl, initial_capital)
+        met.update({
+            '最大同時持股設定': int(max_pos),
+            '單筆目標資金%': float(pos_pct),
+            '名目最大投入%': float(max_pos) * float(pos_pct),
+            '總訊號': int(stx.get('總訊號', 0)),
+            '接受訊號': int(stx.get('接受訊號', 0)),
+            '槽位拒絕': int(stx.get('槽位拒絕', 0)),
+            '資金拒絕': int(stx.get('資金拒絕', 0)),
+            '同股去重': int(stx.get('同股去重', 0)),
+        })
+        met['承接率%'] = (
+            met['接受訊號'] / met['總訊號'] * 100
+            if met['總訊號'] else 0.0
+        )
+        met['報酬/MDD'] = (
+            float(met.get('CAGR%', 0)) / abs(float(met.get('MTM_MDD%', 0)))
+            if float(met.get('MTM_MDD%', 0)) != 0 else np.nan
+        )
+        return met, (led, od, fl, pos, stx)
+    finally:
+        V3619_MAX_POS = old_max
+        V3619_POS_PCT = old_pct
+
+
+def _v3622_yearly(case_label, ledger, fills):
+    if ledger is None or ledger.empty:
+        return pd.DataFrame()
+    z = _v3619_yearly(ledger, fills)
+    if z is None or z.empty:
+        return pd.DataFrame()
+    z = z.copy()
+    z.insert(0, '配置', case_label)
+    return z
+
+
+st.divider()
+st.subheader('💰 V3.6.22 資金配置穩健度｜25檔 × 3.33% 是否真的是甜蜜點？')
+st.caption(
+    'V3.6.21 已證明 N+1 開盤成交仍可維持 CAGR 49.13%、淨PF 2.20、MTM MDD -19.92%。'
+    '因此本版正式改用「N+1 開盤」作為成交假設；Gate D、排序規則、queue=0 全部鎖定，'
+    '只壓測最大同時持股與單筆目標資金比例，避免把資金配置誤當成選股優勢。'
+)
+
+if 'next_open' in globals() and isinstance(next_open, pd.DataFrame) and not next_open.empty and 'px19' in globals() and px19:
+    # 以 25×3.33 為中心，刻意測較保守與較積極配置。
+    configs22 = [
+        (20, 3.00), (20, 3.33), (20, 4.00), (20, 5.00),
+        (25, 2.50), (25, 3.00), (25, 3.33), (25, 3.50), (25, 4.00),
+        (30, 2.50), (30, 3.00), (30, 3.33),
+    ]
+
+    rows22 = []
+    packs22 = {}
+    for mp, pp in configs22:
+        label = f'{mp}檔 × {pp:g}%'
+        rr, pack = _v3622_run_allocation(
+            next_open, px19, capital, mp, pp, fee, tax, slip
+        )
+        rr['配置'] = label
+        rows22.append(rr)
+        packs22[label] = pack
+
+    grid22 = pd.DataFrame(rows22)
+
+    # 正式基準：25 × 3.33
+    base22 = grid22[
+        (grid22['最大同時持股設定'] == 25) &
+        (np.isclose(grid22['單筆目標資金%'], 3.33))
+    ].iloc[0]
+
+    for c in ['總報酬%','CAGR%','MTM_MDD%','Calmar','淨PF','淨勝率%','承接率%']:
+        grid22[f'{c}差異'] = grid22[c] - float(base22[c])
+
+    # 可行性：不允許名目配置 >100%，且實際最高資金使用率不可明顯穿越100.5%
+    grid22['名目可行'] = grid22['名目最大投入%'] <= 100.0 + 1e-9
+    grid22['實際資金可行'] = grid22['最高資金使用率%'] <= 100.5
+    grid22['MDD合格'] = grid22['MTM_MDD%'] >= -25
+    grid22['PF合格'] = grid22['淨PF'] >= 1.50
+    grid22['Calmar合格'] = grid22['Calmar'] >= 1.50
+    grid22['年度待驗'] = True
+
+    st.markdown('### 🏆 ㊹ 資金配置 Grid PK｜全部採 N+1 開盤')
+    show22 = [
+        '配置','總報酬%','CAGR%','MTM_MDD%','Calmar','淨PF','淨勝率%',
+        '完成交易','承接率%','最高持股','平均持股',
+        '平均資金使用率%','最高資金使用率%','槽位拒絕','資金拒絕',
+        '名目最大投入%','報酬/MDD'
+    ]
+    st.dataframe(
+        grid22.sort_values(['Calmar','淨PF','CAGR%'], ascending=False)[show22].round(4),
+        use_container_width=True, hide_index=True
+    )
+
+    # 只看 25 檔：回答使用者最直接的 3% vs 3.33% vs 4% 問題
+    st.markdown('### 🔬 ㊺ 固定 25 檔｜單筆資金比例敏感度')
+    fixed25 = grid22[grid22['最大同時持股設定'] == 25].copy()
+    fixed25 = fixed25.sort_values('單筆目標資金%')
+    fixed25_show = [
+        '單筆目標資金%','名目最大投入%','CAGR%','MTM_MDD%','Calmar','淨PF',
+        '承接率%','平均資金使用率%','最高資金使用率%',
+        'CAGR%差異','MTM_MDD%差異','Calmar差異','淨PF差異'
+    ]
+    st.dataframe(fixed25[fixed25_show].round(4), use_container_width=True, hide_index=True)
+
+    # 年度穩定度：針對核心候選，不讓總績效掩蓋單一年份失效
+    core_labels22 = ['20檔 × 4%', '25檔 × 3%', '25檔 × 3.33%', '25檔 × 3.5%', '30檔 × 3%']
+    yr_parts22 = []
+    for lab in core_labels22:
+        if lab in packs22:
+            led22, od22, fl22, pos22, stx22 = packs22[lab]
+            yy = _v3622_yearly(lab, led22, fl22)
+            if not yy.empty:
+                yr_parts22.append(yy)
+    yr22 = pd.concat(yr_parts22, ignore_index=True) if yr_parts22 else pd.DataFrame()
+
+    st.markdown('### 📅 ㊻ 核心配置年度穩定度')
+    if not yr22.empty:
+        st.dataframe(yr22.round(4), use_container_width=True, hide_index=True)
+
+    # 穩健排名：不追求最高 CAGR，優先 Calmar / MDD / PF / 年度正報酬。
+    robust_rows22 = []
+    for _, r in grid22.iterrows():
+        lab = r['配置']
+        pack = packs22.get(lab)
+        if pack is None:
+            continue
+        led22, od22, fl22, pos22, stx22 = pack
+        yy = _v3622_yearly(lab, led22, fl22)
+        pos_year_ratio = (
+            float((yy['年度報酬%'] > 0).mean() * 100)
+            if yy is not None and not yy.empty and '年度報酬%' in yy.columns else np.nan
+        )
+        worst_year = (
+            float(yy['年度報酬%'].min())
+            if yy is not None and not yy.empty and '年度報酬%' in yy.columns else np.nan
+        )
+        robust_rows22.append({
+            '配置': lab,
+            '正報酬年度比例%': pos_year_ratio,
+            '最差年度報酬%': worst_year,
+            'CAGR%': r['CAGR%'],
+            'MTM_MDD%': r['MTM_MDD%'],
+            'Calmar': r['Calmar'],
+            '淨PF': r['淨PF'],
+            '承接率%': r['承接率%'],
+            '最高資金使用率%': r['最高資金使用率%'],
+            '名目最大投入%': r['名目最大投入%'],
+            '可行': bool(
+                r['名目可行'] and r['實際資金可行'] and
+                r['MDD合格'] and r['PF合格'] and r['Calmar合格']
+            )
+        })
+
+    robust22 = pd.DataFrame(robust_rows22)
+    if not robust22.empty:
+        robust22 = robust22.sort_values(
+            ['可行','正報酬年度比例%','Calmar','淨PF','CAGR%'],
+            ascending=[False,False,False,False,False]
+        ).reset_index(drop=True)
+
+    st.markdown('### 🧠 ㊼ V3.6.22 穩健配置排名')
+    if not robust22.empty:
+        st.dataframe(robust22.round(4), use_container_width=True, hide_index=True)
+
+    # 正式判定：25×3.33 不必「第一名」，只要位於穩健平台且沒有被鄰近參數明顯支配。
+    b_cagr = float(base22['CAGR%'])
+    b_mdd = float(base22['MTM_MDD%'])
+    b_cal = float(base22['Calmar'])
+    b_pf = float(base22['淨PF'])
+
+    neigh = grid22[
+        (grid22['最大同時持股設定'] == 25) &
+        (grid22['單筆目標資金%'].isin([3.0, 3.33, 3.5, 4.0]))
+    ].copy()
+
+    best_cal = float(neigh['Calmar'].max()) if not neigh.empty else b_cal
+    best_pf = float(neigh['淨PF'].max()) if not neigh.empty else b_pf
+    cal_keep = b_cal / best_cal * 100 if best_cal > 0 else np.nan
+    pf_keep = b_pf / best_pf * 100 if best_pf > 0 else np.nan
+
+    # 3% 與 3.33% 的直接差異
+    row3 = fixed25[np.isclose(fixed25['單筆目標資金%'], 3.0)]
+    if not row3.empty:
+        row3 = row3.iloc[0]
+        cagr_gain_vs3 = b_cagr - float(row3['CAGR%'])
+        mdd_cost_vs3 = b_mdd - float(row3['MTM_MDD%'])
+        cal_diff_vs3 = b_cal - float(row3['Calmar'])
+    else:
+        cagr_gain_vs3 = mdd_cost_vs3 = cal_diff_vs3 = np.nan
+
+    checks22 = pd.DataFrame([
+        {'驗證':'25×3.33 名目投入 ≤ 100%','結果':f"{base22['名目最大投入%']:.2f}%",'通過':base22['名目最大投入%']<=100},
+        {'驗證':'25×3.33 真正MTM MDD ≥ -25%','結果':f'{b_mdd:.2f}%','通過':b_mdd>=-25},
+        {'驗證':'25×3.33 淨PF ≥ 1.50','結果':f'{b_pf:.2f}','通過':b_pf>=1.50},
+        {'驗證':'25×3.33 Calmar ≥ 1.50','結果':f'{b_cal:.2f}','通過':b_cal>=1.50},
+        {'驗證':'Calmar 至少保留鄰近最佳的90%','結果':f'{cal_keep:.1f}%','通過':cal_keep>=90},
+        {'驗證':'PF 至少保留鄰近最佳的90%','結果':f'{pf_keep:.1f}%','通過':pf_keep>=90},
+        {'驗證':'最高實際資金使用率 ≤ 100.5%','結果':f"{base22['最高資金使用率%']:.2f}%",'通過':base22['最高資金使用率%']<=100.5},
+    ])
+
+    st.markdown('### 📋 ㊽ V3.6.22 正式判定')
+    st.dataframe(checks22, use_container_width=True, hide_index=True)
+
+    if np.isfinite(cagr_gain_vs3):
+        st.info(
+            f'📌 25檔固定比較：3.33% 相對 3.00% 的 CAGR 差異 {cagr_gain_vs3:+.2f} ppt；'
+            f'MDD 差異 {mdd_cost_vs3:+.2f} ppt；Calmar 差異 {cal_diff_vs3:+.2f}。'
+            '這一列就是判斷「多投入 0.33%/筆是否值得」的核心數字。'
+        )
+
+    if bool(checks22['通過'].all()):
+        st.success(
+            '🟢 V3.6.22 通過：25檔 × 3.33% 位於可行且穩健的資金配置平台。'
+            '後續不再因單次回測小幅差異調整 3.33%；除非更嚴格 OOS / Monte Carlo 顯示其被鄰近配置明顯支配。'
+        )
+    else:
+        st.warning(
+            '🟡 V3.6.22 有條件未通過：先不要微調 Gate D。'
+            '下一步應判斷是持股上限造成槽位壓力，還是單筆資金比例造成 MDD / 資金使用率惡化。'
+        )
+
+    st.download_button(
+        '⬇️ 下載 V3.6.22 資金配置 Grid',
+        grid22.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        'V3.6.22_capital_allocation_grid.csv',
+        'text/csv',
+        key='dl_v3622_grid'
+    )
+    if not yr22.empty:
+        st.download_button(
+            '⬇️ 下載 V3.6.22 年度配置穩定度',
+            yr22.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            'V3.6.22_capital_allocation_yearly.csv',
+            'text/csv',
+            key='dl_v3622_yearly'
+        )
+else:
+    st.info('請先完成 V3.6.21；V3.6.22 會直接沿用已重建完成的 N+1 開盤 Gate D 訊號。')
