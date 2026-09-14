@@ -5887,7 +5887,7 @@ def _v3611_locked_validation(events,min_sample=50):
         'events':events,'gate_events':gate
     }
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28.1｜Health Hotfix｜Forward 健康檢查＋Fail-Closed｜即時優先＋盤後備援')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28.2｜無人值守 Auto Forward｜自動封存＋N+1＋MTM＋Fail-Closed')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -6456,6 +6456,11 @@ def _v3624_empty_state():
         # 用來偵測其他瀏覽器/舊分頁是否先更新過，避免舊資料覆蓋新資料。
         'cloud_revision': 0,
         'cloud_last_saved_at': '',
+        # V3.6.28.2：無人值守 Auto Forward 稽核欄位
+        'last_auto_date': '',
+        'last_auto_at': '',
+        'last_auto_status': '尚未執行',
+        'automation_runs': [],
         'locked_rules': {
             'Gate': 'D｜90~94＋站上MA200',
             'rank': '分數→成交額→近MA200',
@@ -6539,6 +6544,10 @@ def _v3624_load_state():
                 state['version'] = 'V3.6.25.2'
                 state.setdefault('cloud_revision', 0)
                 state.setdefault('cloud_last_saved_at', '')
+                state.setdefault('last_auto_date', '')
+                state.setdefault('last_auto_at', '')
+                state.setdefault('last_auto_status', '尚未執行')
+                state.setdefault('automation_runs', [])
                 st.session_state['v3624_state'] = state
                 return state
     except Exception:
@@ -6561,6 +6570,10 @@ def _v3624_commit(state):
     state['version'] = 'V3.6.25.2'
     state.setdefault('cloud_revision', 0)
     state.setdefault('cloud_last_saved_at', '')
+    state.setdefault('last_auto_date', '')
+    state.setdefault('last_auto_at', '')
+    state.setdefault('last_auto_status', '尚未執行')
+    state.setdefault('automation_runs', [])
     st.session_state['v3624_state'] = state
 
     local_ok, local_err = _v3624_save_state(state)
@@ -6997,6 +7010,107 @@ def _v3624_seal_today_signals(state, result_df):
     state['signal_keys']=sorted(keys)
     return n,f'已封存 {n} 筆今日 Gate D 訊號。'
 
+# ============================================================
+# 🤖 V3.6.28.2 無人值守 Auto Forward
+# - App 只要在交易日盤後被執行，就會自動：
+#   1) 處理舊持倉 D40 / -12%
+#   2) 將前一交易日已封存 Pending 依真正 N+1 Open 成交
+#   3) 建立/更新當日 MTM Ledger
+#   4) 封存「今日」Gate D 訊號，留待下一交易日 N+1
+#   5) 單次安全 Commit 到 Google Drive
+# - signal_keys + last_auto_date 保證同一天重跑不會重複封存。
+# - 真正無人值守需搭配 GitHub Actions 排程；Streamlit Cloud 本身不保證常駐。
+# ============================================================
+
+def _v36282_auto_config():
+    cfg={'enabled':True,'after_hour':14,'after_minute':30}
+    try:
+        z=dict(st.secrets.get('forward_auto',{}))
+        if 'enabled' in z:
+            v=z.get('enabled')
+            cfg['enabled']=bool(v) if isinstance(v,bool) else str(v).strip().lower() not in ('0','false','no','off')
+        if 'after_hour' in z: cfg['after_hour']=int(z.get('after_hour'))
+        if 'after_minute' in z: cfg['after_minute']=int(z.get('after_minute'))
+    except Exception:
+        pass
+    cfg['after_hour']=max(0,min(23,int(cfg['after_hour'])))
+    cfg['after_minute']=max(0,min(59,int(cfg['after_minute'])))
+    return cfg
+
+
+def _v36282_auto_due(state, now=None):
+    now=now or taiwan_now()
+    cfg=_v36282_auto_config()
+    today=now.strftime('%Y-%m-%d')
+    if not cfg['enabled']:
+        return False,'⚪ Auto Forward 已停用'
+    if now.weekday()>=5:
+        return False,'⚪ 休市日，不執行 Auto Forward'
+    cutoff=cfg['after_hour']*60+cfg['after_minute']
+    if now.hour*60+now.minute < cutoff:
+        return False,f"⚪ 等待盤後 {cfg['after_hour']:02d}:{cfg['after_minute']:02d} 後自動執行"
+    if str((state or {}).get('last_auto_date',''))==today:
+        return False,f"🟢 今日 Auto Forward 已完成｜{(state or {}).get('last_auto_at','')}"
+    return True,'🟡 今日尚未自動執行'
+
+
+def _v36282_add_audit(state,status,detail,signal_count=0):
+    rec={
+        'date':taiwan_now().strftime('%Y-%m-%d'),
+        'at':taiwan_time_text(),
+        'status':str(status),
+        'detail':str(detail),
+        'sealed_signals':int(signal_count),
+    }
+    runs=state.setdefault('automation_runs',[])
+    runs.append(rec)
+    # 防止 JSON 無限膨脹，保留最近 180 次排程紀錄。
+    if len(runs)>180:
+        state['automation_runs']=runs[-180:]
+    return rec
+
+
+def _v36282_run_auto_forward(state,result_df,health,fee,tax,slip):
+    due,due_text=_v36282_auto_due(state)
+    if not due:
+        return False,due_text,0
+
+    # Fail-Closed：任何會影響正式交易/正式帳本的關鍵異常都不執行。
+    if health.get('seal_blocked') or health.get('sync_blocked'):
+        reasons=[]
+        reasons.extend(health.get('seal_reasons',[]) or [])
+        reasons.extend(health.get('sync_reasons',[]) or [])
+        detail='｜'.join(dict.fromkeys(map(str,reasons))) or '健康檢查未通過'
+        state['last_auto_status']='🔴 Fail-Closed｜'+detail
+        _v36282_add_audit(state,'BLOCKED',detail,0)
+        # 不寫正式 Drive，不標記 last_auto_date；晚一點重跑仍可自動重試。
+        return False,state['last_auto_status'],0
+
+    today=taiwan_now().strftime('%Y-%m-%d')
+    # 順序非常重要：先處理「昨天以前」的 Pending / 持倉，再封存今天的新訊號。
+    _v3624_process_open_positions(state,fee,tax,slip)
+    _v3624_process_pending(state,fee,tax,slip)
+    _v3624_append_ledger(state)
+    n,seal_msg=_v3624_seal_today_signals(state,result_df)
+
+    state['last_auto_date']=today
+    state['last_auto_at']=taiwan_time_text()
+    state['last_auto_status']=f'🟢 完成｜今日封存 {n} 筆｜N+1/MTM 已同步'
+    _v36282_add_audit(state,'SUCCESS',state['last_auto_status'],n)
+    ok,err=_v3624_commit(state)
+
+    # Drive 是正式帳本；local 寫入成功但 Drive 回報失敗時仍視為未完成，讓下一次排程可重試。
+    drive_status=st.session_state.get('v36251_drive_status',{}) or {}
+    drive_ok=bool(drive_status.get('ok',False)) if '_v36251_oauth_configured' in globals() and _v36251_oauth_configured() else True
+    if (not ok) or (not drive_ok):
+        state['last_auto_date']=''
+        msg=err or str(drive_status.get('message','Drive 同步未確認'))
+        state['last_auto_status']='🔴 自動同步未完成｜'+msg
+        _v3624_save_state(state)
+        return False,state['last_auto_status'],n
+
+    return True,state['last_auto_status'],n
+
 def _v3624_metrics(state):
     led=pd.DataFrame(state.get('ledger',[]))
     fills=pd.DataFrame(state.get('fills',[]))
@@ -7403,7 +7517,7 @@ def _v36251_drive_test():
 
 st.divider()
 st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.28｜每日健康檢查＋Fail-Closed＋Forward 實戰儀表板＋Drive Revision 防覆寫')
+st.success('✅ Build：V3.6.28.2｜Auto Forward 無人值守＋每日健康檢查＋Fail-Closed＋Drive Revision 防覆寫')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7531,7 +7645,7 @@ c3.metric('成交假設','N+1 開盤')
 c4.metric('出場規則','D40 / -12%')
 
 health28=_v3628_health_snapshot(state24,result if 'result' in globals() else pd.DataFrame())
-st.markdown('### 🩺 每日系統健康檢查｜V3.6.28.1')
+st.markdown('### 🩺 每日系統健康檢查｜V3.6.28.2')
 h1,h2,h3,h4=st.columns(4)
 h1.metric('總體狀態',health28['overall'])
 h2.metric('正常',f"{health28['green']} / {len(health28['rows'])}")
@@ -7558,8 +7672,34 @@ if msg24=='OK':
 else:
     st.info(msg24)
 
+# V3.6.28.2：盤後只要本 App 被執行，就自動跑一次正式 Forward。
+auto_cfg28=_v36282_auto_config()
+auto_due28,auto_due_text28=_v36282_auto_due(state24)
+a1,a2,a3,a4=st.columns(4)
+a1.metric('Auto Forward','✅ 啟用' if auto_cfg28['enabled'] else '⏸️ 停用')
+a2.metric('自動執行門檻',f"{auto_cfg28['after_hour']:02d}:{auto_cfg28['after_minute']:02d} 後")
+a3.metric('今日自動狀態',str(state24.get('last_auto_status','尚未執行'))[:28])
+a4.metric('最後自動日期',str(state24.get('last_auto_date','')) or '—')
+
+if auto_due28:
+    ok_auto28,msg_auto28,n_auto28=_v36282_run_auto_forward(
+        state24,result if 'result' in globals() else pd.DataFrame(),health28,fee24,tax24,slip24
+    )
+    if ok_auto28:
+        st.success(f'🤖 Auto Forward：{msg_auto28}')
+        st.rerun()
+    elif str(msg_auto28).startswith('🔴'):
+        st.error(f'🤖 Auto Forward：{msg_auto28}')
+else:
+    if str(auto_due_text28).startswith('🟢'):
+        st.success(f'🤖 {auto_due_text28}')
+    else:
+        st.info(f'🤖 {auto_due_text28}')
+
+st.caption('GitHub Actions 排程可在你完全沒開電腦時啟動本 App；同一天重跑會由 signal_keys / last_auto_date 防重複。')
+
 b1,b2=st.columns(2)
-if b1.button('🔒 封存今日 Gate D 訊號',key='v3624_seal',use_container_width=True,disabled=health28['seal_blocked']):
+if b1.button('🧯 手動補封存今日 Gate D 訊號',key='v3624_seal',use_container_width=True,disabled=health28['seal_blocked']):
     if health28['seal_blocked']:
         st.error('Fail-Closed：目前禁止封存今日訊號。')
     else:
@@ -7571,7 +7711,7 @@ if b1.button('🔒 封存今日 Gate D 訊號',key='v3624_seal',use_container_wi
             st.warning(txt24)
         st.rerun()
 
-if b2.button('🔄 同步 Forward 帳本 / N+1成交 / MTM',key='v3624_sync',use_container_width=True,disabled=health28['sync_blocked']):
+if b2.button('🧯 手動補同步 Forward / N+1 / MTM',key='v3624_sync',use_container_width=True,disabled=health28['sync_blocked']):
     if health28['sync_blocked']:
         st.error('Fail-Closed：雲端/帳本安全檢查未通過，目前禁止正式同步。')
     else:
@@ -7734,6 +7874,6 @@ st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
     'V3.6.28 的目的不是再找更漂亮的歷史數字，而是把每天真正需要看的 Forward 資金、持倉、損益、風險與樣本進度集中在同一個實戰儀表板。'
-    '每日先看健康檢查；全部關鍵項目正常後，交易日收盤後再按「封存今日 Gate D 訊號」，之後按「同步 Forward 帳本」；'
+    'V3.6.28.2 預設盤後自動執行；手動按鈕只作異常補跑。健康檢查 Fail-Closed 時自動與手動都禁止正式寫入；'
     'OAuth 設定完成後，每次封存與同步會自動備份到 Google Drive；手動 JSON 下載仍保留作第二層備援。'
 )
