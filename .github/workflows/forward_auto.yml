@@ -1,0 +1,94 @@
+name: 黑嚕嚕 Auto Forward
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 台灣時間 15:20：第一次盤後執行
+    - cron: '20 7 * * 1-5'
+    # 台灣時間 17:20：若第一次因資料尚未完整而 Fail-Closed，第二次自動重試
+    - cron: '20 9 * * 1-5'
+
+jobs:
+  auto-forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install app dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Create Streamlit secrets
+        shell: bash
+        env:
+          FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: |
+          mkdir -p .streamlit
+          cat > .streamlit/secrets.toml <<EOF
+          FUGLE_API_KEY = "${FUGLE_API_KEY}"
+
+          [google_drive_oauth]
+          client_id = "${GOOGLE_CLIENT_ID}"
+          client_secret = "${GOOGLE_CLIENT_SECRET}"
+          refresh_token = "${GOOGLE_REFRESH_TOKEN}"
+          token_uri = "https://oauth2.googleapis.com/token"
+          folder_name = "黑嚕嚕_Forward帳本"
+          state_filename = "V3.6.25.1_forward_state.json"
+
+          [forward_auto]
+          enabled = true
+          after_hour = 14
+          after_minute = 30
+          EOF
+
+      - name: Start Streamlit locally
+        run: |
+          nohup streamlit run app.py \
+            --server.headless true \
+            --server.address 127.0.0.1 \
+            --server.port 8501 \
+            > /tmp/streamlit.log 2>&1 &
+          echo $! > /tmp/streamlit.pid
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null; then
+              echo "Streamlit is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/streamlit.log
+          exit 1
+
+      - name: Open app and let Auto Forward run
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page(viewport={"width": 1440, "height": 1200})
+              page.goto("http://127.0.0.1:8501", wait_until="domcontentloaded", timeout=120000)
+              page.wait_for_timeout(120000)
+              print("Auto Forward browser session completed")
+              browser.close()
+          PY
+
+      - name: Show Streamlit log
+        if: always()
+        run: |
+          echo '===== Streamlit log ====='
+          tail -n 250 /tmp/streamlit.log || true
