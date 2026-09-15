@@ -5887,7 +5887,7 @@ def _v3611_locked_validation(events,min_sample=50):
         'events':events,'gate_events':gate
     }
 
-st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28.2｜無人值守 Auto Forward｜自動封存＋N+1＋MTM＋Fail-Closed')
+st.sidebar.title('🖤 黑嚕嚕－台股盤中雷達');st.sidebar.caption('V3.6.28.3｜整數股成交＋透明成本＋Telegram/LINE 通知')
 FUGLE_SECRET_KEY=get_secret_value('FUGLE_API_KEY','')
 fugle_session_key=st.sidebar.text_input('Fugle API Key（可留空）',type='password',value='',help='建議正式版放 Streamlit Secrets：FUGLE_API_KEY')
 FUGLE_API_KEY=(FUGLE_SECRET_KEY or fugle_session_key).strip()
@@ -6771,8 +6771,16 @@ def _v3624_process_pending(state, fee, tax, slip):
             })
             continue
 
-        shares=alloc/unit_cost
-        total=shares*unit_cost
+        # V3.6.28.3：台股零股仍必須是「整數股」，禁止出現 467.8 股這類不存在的持股。
+        shares=int(np.floor(alloc/unit_cost))
+        if shares < 1:
+            state['orders'].append({
+                '日期':entry_date.strftime('%Y-%m-%d'),'股票':sym,
+                '事件':'NEW_SIGNAL','結果':'REJECTED_CASH',
+                '原因':'可用資金不足以買進至少 1 股'
+            })
+            continue
+        total=float(shares)*unit_cost
         state['cash']=float(state.get('cash',0))-total
         state.setdefault('positions',{})[sym]={
             'symbol':sym,'name':r.get('name',''),'market':r.get('market',''),
@@ -7022,6 +7030,130 @@ def _v3624_seal_today_signals(state, result_df):
 # - 真正無人值守需搭配 GitHub Actions 排程；Streamlit Cloud 本身不保證常駐。
 # ============================================================
 
+# ============================================================
+# 📣 V3.6.28.3 成交通知：Telegram / LINE Messaging API
+# Secrets（可只設定其中一種）：
+# [telegram]
+# bot_token = "..."
+# chat_id = "..."
+# [line_messaging]
+# channel_access_token = "..."
+# user_id = "U..."
+# ============================================================
+
+def _v36283_secret_section(name):
+    try:
+        return dict(st.secrets.get(name,{}))
+    except Exception:
+        return {}
+
+
+def _v36283_notify_config():
+    tg=_v36283_secret_section('telegram')
+    ln=_v36283_secret_section('line_messaging')
+    return {
+        'telegram_ready':bool(str(tg.get('bot_token','')).strip() and str(tg.get('chat_id','')).strip()),
+        'telegram_token':str(tg.get('bot_token','')).strip(),
+        'telegram_chat_id':str(tg.get('chat_id','')).strip(),
+        'line_ready':bool(str(ln.get('channel_access_token','')).strip() and str(ln.get('user_id','')).strip()),
+        'line_token':str(ln.get('channel_access_token','')).strip(),
+        'line_user_id':str(ln.get('user_id','')).strip(),
+    }
+
+
+def _v36283_send_message(text):
+    cfg=_v36283_notify_config(); results=[]
+    if cfg['telegram_ready']:
+        try:
+            r=requests.post(
+                f"https://api.telegram.org/bot{cfg['telegram_token']}/sendMessage",
+                json={'chat_id':cfg['telegram_chat_id'],'text':str(text)},timeout=15
+            )
+            r.raise_for_status(); results.append('Telegram✅')
+        except Exception as e:
+            results.append(f'Telegram❌ {type(e).__name__}: {str(e)[:80]}')
+    if cfg['line_ready']:
+        try:
+            r=requests.post(
+                'https://api.line.me/v2/bot/message/push',
+                headers={'Authorization':f"Bearer {cfg['line_token']}",'Content-Type':'application/json'},
+                json={'to':cfg['line_user_id'],'messages':[{'type':'text','text':str(text)}]},timeout=15
+            )
+            r.raise_for_status(); results.append('LINE✅')
+        except Exception as e:
+            results.append(f'LINE❌ {type(e).__name__}: {str(e)[:80]}')
+    if not results: results=['未設定通知管道']
+    return results
+
+
+def _v36283_order_key(o):
+    return '|'.join(str(o.get(k,'')) for k in ['日期','股票','事件','結果','原因'])
+
+
+def _v36283_notify_new_trade_events(state, orders_before=0):
+    """只通知本次同步新產生的實際成交事件；訊號封存/拒絕單不推播。"""
+    state.setdefault('notification_keys',[])
+    known=set(map(str,state.get('notification_keys',[])))
+    sent=[]
+    for o in state.get('orders',[])[int(orders_before):]:
+        event=str(o.get('事件','')); result=str(o.get('結果',''))
+        if not ((event=='NEW_SIGNAL' and result=='ACCEPTED_OPEN') or (event=='CLOSE' and result=='FILLED')):
+            continue
+        key=_v36283_order_key(o)
+        if key in known: continue
+        sym=str(o.get('股票','')).zfill(4)
+        if event=='NEW_SIGNAL':
+            p=state.get('positions',{}).get(sym,{})
+            shares=int(np.floor(float(p.get('shares',0))))
+            raw=float(p.get('entry_raw',0) or 0); exe=float(p.get('entry_exec',0) or 0)
+            cost=float(p.get('entry_total_cost',0) or 0)
+            text=(f"🖤 黑嚕嚕 Forward｜N+1 買進成交\n"
+                  f"{sym} {p.get('name','')}\n"
+                  f"訊號日：{p.get('signal_date','')}\n進場日：{p.get('entry_date','')}\n"
+                  f"N+1 開盤：{raw:,.2f} 元/股\n模擬成交價：{exe:,.3f} 元/股\n"
+                  f"股數：{shares:,} 股\n實際成交成本：{cost:,.0f} 元\n"
+                  f"技術分數：{p.get('score','')}｜配置：3.33%")
+        else:
+            fs=[x for x in state.get('fills',[]) if str(x.get('股票','')).zfill(4)==sym and str(x.get('出場日',''))==str(o.get('日期',''))]
+            f=fs[-1] if fs else {}
+            text=(f"🖤 黑嚕嚕 Forward｜賣出成交\n"
+                  f"{sym} {f.get('名稱','')}\n出場日：{f.get('出場日',o.get('日期',''))}\n"
+                  f"出場價：{float(f.get('出場價',0) or 0):,.2f} 元/股\n股數：{int(np.floor(float(f.get('股數',0) or 0))):,} 股\n"
+                  f"淨損益：{float(f.get('淨損益',0) or 0):+,.0f} 元\n"
+                  f"淨報酬：{float(f.get('淨報酬%',0) or 0):+.2f}%\n原因：{f.get('出場原因',o.get('原因',''))}")
+        res=_v36283_send_message(text)
+        known.add(key); sent.append(f"{sym}："+' / '.join(res))
+    state['notification_keys']=sorted(known)[-1000:]
+    state['last_notification_status']='；'.join(sent) if sent else '本次無新成交通知'
+    state['last_notification_at']=taiwan_time_text()
+    return sent
+
+
+def _v36283_migrate_fractional_positions(state):
+    """一次性修正舊版 Forward 的小數股 bug；向下取整並把未實際投入的差額退回現金。"""
+    changed=[]
+    for sym,p in state.get('positions',{}).items():
+        try:
+            old_sh=float(p.get('shares',0)); new_sh=int(np.floor(old_sh+1e-12))
+            if new_sh<1 or abs(old_sh-new_sh)<1e-9: continue
+            old_cost=float(p.get('entry_total_cost',0))
+            entry_exec=float(p.get('entry_exec',p.get('entry_raw',0)))
+            # 由舊帳成本/股數保留當時實際每股總成本（含當時費率），避免改寫成交假設。
+            unit_total=(old_cost/old_sh) if old_sh>0 else entry_exec
+            new_cost=float(new_sh)*unit_total
+            refund=max(0.0,old_cost-new_cost)
+            p['shares']=new_sh; p['entry_total_cost']=new_cost
+            state['cash']=float(state.get('cash',0))+refund
+            state.setdefault('orders',[]).append({
+                '日期':taiwan_now().strftime('%Y-%m-%d'),'股票':str(sym).zfill(4),
+                '事件':'DATA_FIX','結果':'INTEGER_SHARES',
+                '原因':f'V3.6.28.3 修正舊版小數股 {old_sh:.6f}→{new_sh} 股；退回未投入現金 {refund:.2f}'
+            })
+            changed.append((sym,old_sh,new_sh,refund))
+        except Exception:
+            continue
+    return changed
+
 def _v36282_auto_config():
     cfg={'enabled':True,'after_hour':14,'after_minute':30}
     try:
@@ -7087,6 +7219,7 @@ def _v36282_run_auto_forward(state,result_df,health,fee,tax,slip):
         return False,state['last_auto_status'],0
 
     today=taiwan_now().strftime('%Y-%m-%d')
+    orders_before=len(state.get('orders',[]))
     # 順序非常重要：先處理「昨天以前」的 Pending / 持倉，再封存今天的新訊號。
     _v3624_process_open_positions(state,fee,tax,slip)
     _v3624_process_pending(state,fee,tax,slip)
@@ -7109,6 +7242,9 @@ def _v36282_run_auto_forward(state,result_df,health,fee,tax,slip):
         _v3624_save_state(state)
         return False,state['last_auto_status'],n
 
+    # Drive 正式帳本已確認後才發送成交通知，避免雲端未落帳卻先推播。
+    _v36283_notify_new_trade_events(state,orders_before)
+    _v3624_save_state(state)
     return True,state['last_auto_status'],n
 
 def _v3624_metrics(state):
@@ -7517,7 +7653,7 @@ def _v36251_drive_test():
 
 st.divider()
 st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.28.2｜Auto Forward 無人值守＋每日健康檢查＋Fail-Closed＋Drive Revision 防覆寫')
+st.success('✅ Build：V3.6.28.3｜整數股成交＋透明成本＋Telegram/LINE 通知＋Auto Forward＋Fail-Closed')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7534,6 +7670,15 @@ except Exception as _v3624_json_err:
     st.stop()
 
 state24=_v3624_load_state()
+
+# V3.6.28.3：自動修正既有帳本中的小數股（一次性）；正式 Drive 寫入仍由後續安全 Commit 完成。
+_v36283_migration_pending = _v36283_migrate_fractional_positions(state24)
+if _v36283_migration_pending:
+    _mig_ok,_mig_err=_v3624_commit(state24)
+    if _mig_ok:
+        st.success('🧮 V3.6.28.3 已修正舊版小數股持倉為整數股，並退回未投入現金。')
+    else:
+        st.error(f'小數股修正尚未安全寫入 Drive：{_mig_err}')
 
 st.markdown('### ☁️ Google Drive OAuth 永久帳本')
 cfg251=_v36251_oauth_cfg()
@@ -7645,7 +7790,7 @@ c3.metric('成交假設','N+1 開盤')
 c4.metric('出場規則','D40 / -12%')
 
 health28=_v3628_health_snapshot(state24,result if 'result' in globals() else pd.DataFrame())
-st.markdown('### 🩺 每日系統健康檢查｜V3.6.28.2')
+st.markdown('### 🩺 每日系統健康檢查｜V3.6.28.3')
 h1,h2,h3,h4=st.columns(4)
 h1.metric('總體狀態',health28['overall'])
 h2.metric('正常',f"{health28['green']} / {len(health28['rows'])}")
@@ -7716,11 +7861,15 @@ if b2.button('🧯 手動補同步 Forward / N+1 / MTM',key='v3624_sync',use_con
         st.error('Fail-Closed：雲端/帳本安全檢查未通過，目前禁止正式同步。')
     else:
         # 順序固定：先處理舊持倉出場，再處理先前已封存 pending 訊號，再做今日 MTM。
+        orders_before24=len(state24.get('orders',[]))
         _v3624_process_open_positions(state24,fee24,tax24,slip24)
         _v3624_process_pending(state24,fee24,tax24,slip24)
         _v3624_append_ledger(state24)
         ok24,err24=_v3624_commit(state24)
-        if ok24: st.success('Forward 帳本同步完成。')
+        if ok24:
+            _v36283_notify_new_trade_events(state24,orders_before24)
+            _v3624_save_state(state24)
+            st.success('Forward 帳本同步完成。')
         else: st.warning(f'帳本已在本次工作階段更新，但本機 JSON 儲存失敗：{err24}')
         st.rerun()
 
@@ -7799,6 +7948,14 @@ elif status24.startswith('🟡') or status24.startswith('🟠'):
 else:
     st.error(f'{status24}｜{status_text24}')
 
+st.markdown('### 📣 成交通知')
+ncfg83=_v36283_notify_config()
+n1,n2,n3=st.columns(3)
+n1.metric('Telegram','✅ 已設定' if ncfg83['telegram_ready'] else '⚪ 未設定')
+n2.metric('LINE Messaging','✅ 已設定' if ncfg83['line_ready'] else '⚪ 未設定')
+n3.metric('最後通知',str(state24.get('last_notification_status','尚無'))[:32])
+st.caption('只在 Forward 真正 N+1 買進成交或 D40/-12% 賣出成交後推播；Gate D 封存與拒絕單不推播。通知失敗不會改變交易帳本。')
+
 st.markdown('### 🧾 Forward 訂單生命週期')
 od24=pd.DataFrame(state24.get('orders',[]))
 if od24.empty:
@@ -7822,8 +7979,11 @@ for sym,p in state24.get('positions',{}).items():
     pos_rows.append({
         '股票':sym,'名稱':p.get('name',''),'訊號日':p.get('signal_date',''),
         'N+1進場日':p.get('entry_date',''),'技術分數':p.get('score',np.nan),
-        '進場價':p.get('entry_raw',np.nan),'最新收盤':px,
-        '投入成本':p.get('entry_total_cost',np.nan),'持倉市值':mv,
+        '進場價(元/股)':p.get('entry_raw',np.nan),
+        '成交價含滑價':p.get('entry_exec',np.nan),
+        '持有股數':int(np.floor(float(p.get('shares',0)))) if pd.notna(p.get('shares',np.nan)) else 0,
+        '最新收盤(元/股)':px,
+        '實際成交成本':p.get('entry_total_cost',np.nan),'持倉市值':mv,
         '未實現損益':pnl,
         '未實現報酬%':pnl/float(p.get('entry_total_cost',1))*100 if pd.notna(pnl) and p.get('entry_total_cost',0) else np.nan
     })
@@ -7874,6 +8034,6 @@ st.dataframe(rules24,use_container_width=True,hide_index=True)
 
 st.success(
     'V3.6.28 的目的不是再找更漂亮的歷史數字，而是把每天真正需要看的 Forward 資金、持倉、損益、風險與樣本進度集中在同一個實戰儀表板。'
-    'V3.6.28.2 預設盤後自動執行；手動按鈕只作異常補跑。健康檢查 Fail-Closed 時自動與手動都禁止正式寫入；'
+    'V3.6.28.3 預設盤後自動執行；手動按鈕只作異常補跑。健康檢查 Fail-Closed 時自動與手動都禁止正式寫入；'
     'OAuth 設定完成後，每次封存與同步會自動備份到 Google Drive；手動 JSON 下載仍保留作第二層備援。'
 )
