@@ -37,6 +37,8 @@ jobs:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p .streamlit
           cat > .streamlit/secrets.toml <<EOF
@@ -49,6 +51,10 @@ jobs:
           token_uri = "https://oauth2.googleapis.com/token"
           folder_name = "黑嚕嚕_Forward帳本"
           state_filename = "V3.6.25.1_forward_state.json"
+
+          [telegram]
+          bot_token = "${TELEGRAM_BOT_TOKEN}"
+          chat_id = "${TELEGRAM_CHAT_ID}"
 
           [forward_auto]
           enabled = true
