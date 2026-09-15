@@ -7956,6 +7956,19 @@ n2.metric('LINE Messaging','✅ 已設定' if ncfg83['line_ready'] else '⚪ 未
 n3.metric('最後通知',str(state24.get('last_notification_status','尚無'))[:32])
 st.caption('只在 Forward 真正 N+1 買進成交或 D40/-12% 賣出成交後推播；Gate D 封存與拒絕單不推播。通知失敗不會改變交易帳本。')
 
+if st.button('📨 發送 Telegram / LINE 測試通知', key='v36283_test_notify', use_container_width=True):
+    test_text = (
+        '🖤 黑嚕嚕台股雷達\n'
+        'Telegram / LINE 通知測試成功 ✅\n'
+        'Build：V3.6.28.3\n'
+        f'時間：{taiwan_time_text()}'
+    )
+    test_results = _v36283_send_message(test_text)
+    if any('✅' in x for x in test_results):
+        st.success('｜'.join(test_results) + '｜測試訊息已送出，請查看手機。')
+    else:
+        st.error('｜'.join(test_results) + '｜測試失敗，請檢查 Secrets。')
+
 st.markdown('### 🧾 Forward 訂單生命週期')
 od24=pd.DataFrame(state24.get('orders',[]))
 if od24.empty:
