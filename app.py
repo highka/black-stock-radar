@@ -7202,6 +7202,41 @@ def _v36282_add_audit(state,status,detail,signal_count=0):
     return rec
 
 
+
+def _v36284_close_summary_text(state):
+    led = state.get('ledger', []) or []
+    last = led[-1] if led else {}
+    equity = float(last.get('MTM權益', state.get('cash', 0)) or 0)
+    cash = float(last.get('現金', state.get('cash', 0)) or 0)
+    mv = float(last.get('持倉市值', 0) or 0)
+    initial = float(state.get('initial_capital', V3624_INITIAL_CAPITAL) or V3624_INITIAL_CAPITAL)
+    total_ret = (equity / initial - 1) * 100 if initial > 0 else 0.0
+    fills_today = [x for x in (state.get('fills', []) or [])
+                   if str(x.get('出場日', '')) == taiwan_now().strftime('%Y-%m-%d')]
+    orders_today = [x for x in (state.get('orders', []) or [])
+                    if str(x.get('日期', '')) == taiwan_now().strftime('%Y-%m-%d')]
+    buys = sum(1 for x in orders_today if str(x.get('事件',''))=='NEW_SIGNAL'
+               and str(x.get('結果',''))=='ACCEPTED_OPEN')
+    return (
+        "🌙 黑嚕嚕 Forward｜每日收盤摘要\n"
+        f"日期：{taiwan_now().strftime('%Y-%m-%d')}\n"
+        f"總權益：{equity:,.0f} 元｜累積報酬：{total_ret:+.2f}%\n"
+        f"現金：{cash:,.0f} 元｜持倉市值：{mv:,.0f} 元\n"
+        f"持股：{len(state.get('positions',{}))} / {V3624_MAX_POS}\n"
+        f"Pending N+1：{len(state.get('pending',[]))}\n"
+        f"今日買進：{buys} 筆｜今日出場：{len(fills_today)} 筆\n"
+        f"Drive revision：{state.get('cloud_revision','-')}\n"
+        f"Auto Forward：{state.get('last_auto_status','-')}"
+    )
+
+
+def _v36284_send_close_summary(state):
+    res = _v36283_send_message(_v36284_close_summary_text(state))
+    state['last_close_summary_status'] = ' / '.join(res)
+    state['last_close_summary_at'] = taiwan_time_text()
+    return res
+
+
 def _v36282_run_auto_forward(state,result_df,health,fee,tax,slip):
     due,due_text=_v36282_auto_due(state)
     if not due:
@@ -7244,6 +7279,8 @@ def _v36282_run_auto_forward(state,result_df,health,fee,tax,slip):
 
     # Drive 正式帳本已確認後才發送成交通知，避免雲端未落帳卻先推播。
     _v36283_notify_new_trade_events(state,orders_before)
+    # V3.6.28.4：每日 Auto Forward 成功且 Drive 已確認後，固定推播一次收盤摘要。
+    _v36284_send_close_summary(state)
     _v3624_save_state(state)
     return True,state['last_auto_status'],n
 
@@ -7653,7 +7690,7 @@ def _v36251_drive_test():
 
 st.divider()
 st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.28.3｜整數股成交＋透明成本＋Telegram/LINE 通知＋Auto Forward＋Fail-Closed')
+st.success('✅ Build：V3.6.28.4｜整數股成交＋收盤摘要＋OAuth警報＋Telegram/LINE＋Auto Forward＋Fail-Closed')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7960,7 +7997,7 @@ if st.button('📨 發送 Telegram / LINE 測試通知', key='v36283_test_notify
     test_text = (
         '🖤 黑嚕嚕台股雷達\n'
         'Telegram / LINE 通知測試成功 ✅\n'
-        'Build：V3.6.28.3\n'
+        'Build：V3.6.28.4\n'
         f'時間：{taiwan_time_text()}'
     )
     test_results = _v36283_send_message(test_text)
@@ -7968,6 +8005,16 @@ if st.button('📨 發送 Telegram / LINE 測試通知', key='v36283_test_notify
         st.success('｜'.join(test_results) + '｜測試訊息已送出，請查看手機。')
     else:
         st.error('｜'.join(test_results) + '｜測試失敗，請檢查 Secrets。')
+
+
+if st.button('🌙 發送今日收盤摘要測試', key='v36284_test_close_summary', use_container_width=True):
+    summary_results = _v36283_send_message(_v36284_close_summary_text(state24))
+    if any('✅' in x for x in summary_results):
+        st.success('｜'.join(summary_results) + '｜收盤摘要測試已送出。')
+    else:
+        st.error('｜'.join(summary_results) + '｜收盤摘要測試失敗。')
+
+st.caption('OAuth Testing 的 refresh token 沒有可供程式可靠讀取的「精確到期時間」。GitHub Actions 會每天早上主動測試 refresh token；一旦失效，Telegram 會立即發出 OAuth 警報。')
 
 st.markdown('### 🧾 Forward 訂單生命週期')
 od24=pd.DataFrame(state24.get('orders',[]))
