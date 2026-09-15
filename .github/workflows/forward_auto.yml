@@ -3,6 +3,8 @@ name: 黑嚕嚕 Auto Forward
 on:
   workflow_dispatch:
   schedule:
+    # 台灣時間 08:20：先做 OAuth/Drive 憑證健康檢查；Testing token 失效時 Telegram 立即警報
+    - cron: '20 0 * * 1-5'
     # 台灣時間 15:20：第一次盤後執行
     - cron: '20 7 * * 1-5'
     # 台灣時間 17:20：若第一次因資料尚未完整而 Fail-Closed，第二次自動重試
@@ -61,6 +63,55 @@ jobs:
           after_hour = 14
           after_minute = 30
           EOF
+
+      - name: Check Google OAuth and alert Telegram
+        shell: bash
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, requests, sys
+          cid=os.environ.get("GOOGLE_CLIENT_ID","")
+          secret=os.environ.get("GOOGLE_CLIENT_SECRET","")
+          refresh=os.environ.get("GOOGLE_REFRESH_TOKEN","")
+          tg=os.environ.get("TELEGRAM_BOT_TOKEN","")
+          chat=os.environ.get("TELEGRAM_CHAT_ID","")
+          try:
+              r=requests.post("https://oauth2.googleapis.com/token", data={
+                  "client_id":cid, "client_secret":secret,
+                  "refresh_token":refresh, "grant_type":"refresh_token"
+              }, timeout=20)
+              ok=(r.status_code==200 and bool((r.json() or {}).get("access_token")))
+          except Exception as e:
+              r=None; ok=False
+          if ok:
+              print("Google OAuth refresh token: OK")
+              sys.exit(0)
+          detail="unknown error"
+          if r is not None:
+              try:
+                  j=r.json() or {}
+                  detail=str(j.get("error_description") or j.get("error") or f"HTTP {r.status_code}")
+              except Exception:
+                  detail=f"HTTP {r.status_code}"
+          msg=("🚨 黑嚕嚕｜Google OAuth 警報\n"
+               "Google refresh token 健康檢查失敗。\n"
+               f"原因：{detail[:180]}\n"
+               "Auto Forward 可能無法讀寫 Drive，請重新授權並更新 Streamlit / GitHub 的 refresh token。")
+          if tg and chat:
+              try:
+                  requests.post(f"https://api.telegram.org/bot{tg}/sendMessage",
+                                json={"chat_id":chat,"text":msg},timeout=15).raise_for_status()
+                  print("Telegram OAuth alert sent")
+              except Exception as e:
+                  print("Telegram alert failed:", type(e).__name__)
+          # Mark job failed so GitHub also shows a red failure.
+          sys.exit(1)
+          PY
 
       - name: Start Streamlit locally
         run: |
