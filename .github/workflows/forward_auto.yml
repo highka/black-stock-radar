@@ -1,19 +1,31 @@
-name: 黑嚕嚕 Auto Forward
+name: 黑嚕嚕 Auto Forward V3.6.29
 
 on:
   workflow_dispatch:
   schedule:
-    # 台灣時間 08:20：先做 OAuth/Drive 憑證健康檢查；Testing token 失效時 Telegram 立即警報
+    # GitHub cron 使用 UTC；台灣時間 = UTC+8
+    # 08:20 Taiwan：OAuth 健康檢查
     - cron: '20 0 * * 1-5'
-    # 台灣時間 15:20：第一次盤後執行
+    # 15:20 Taiwan：正式盤後執行
     - cron: '20 7 * * 1-5'
-    # 台灣時間 17:20：若第一次因資料尚未完整而 Fail-Closed，第二次自動重試
+    # 17:20 Taiwan：第二次重試
     - cron: '20 9 * * 1-5'
+
+permissions:
+  contents: read
 
 jobs:
   auto-forward:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TZ: Asia/Taipei
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -25,22 +37,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install app dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install playwright
-          python -m playwright install --with-deps chromium
 
       - name: Create Streamlit secrets
         shell: bash
-        env:
-          FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p .streamlit
           cat > .streamlit/secrets.toml <<EOF
@@ -60,92 +63,42 @@ jobs:
 
           [forward_auto]
           enabled = true
-          after_hour = 14
-          after_minute = 30
+          cutoff_hour = 14
+          cutoff_minute = 30
           EOF
 
-      - name: Check Google OAuth and alert Telegram
+      - name: OAuth health check
         shell: bash
-        env:
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
-          import os, requests, sys
-          cid=os.environ.get("GOOGLE_CLIENT_ID","")
-          secret=os.environ.get("GOOGLE_CLIENT_SECRET","")
-          refresh=os.environ.get("GOOGLE_REFRESH_TOKEN","")
-          tg=os.environ.get("TELEGRAM_BOT_TOKEN","")
-          chat=os.environ.get("TELEGRAM_CHAT_ID","")
-          try:
-              r=requests.post("https://oauth2.googleapis.com/token", data={
-                  "client_id":cid, "client_secret":secret,
-                  "refresh_token":refresh, "grant_type":"refresh_token"
-              }, timeout=20)
-              ok=(r.status_code==200 and bool((r.json() or {}).get("access_token")))
-          except Exception as e:
-              r=None; ok=False
-          if ok:
-              print("Google OAuth refresh token: OK")
+          import os,requests,sys
+          r=requests.post("https://oauth2.googleapis.com/token",data={
+              "client_id":os.environ["GOOGLE_CLIENT_ID"],
+              "client_secret":os.environ["GOOGLE_CLIENT_SECRET"],
+              "refresh_token":os.environ["GOOGLE_REFRESH_TOKEN"],
+              "grant_type":"refresh_token"},timeout=20)
+          if r.status_code==200 and (r.json() or {}).get("access_token"):
+              print("OAUTH_HEALTH_OK")
               sys.exit(0)
-          detail="unknown error"
-          if r is not None:
-              try:
-                  j=r.json() or {}
-                  detail=str(j.get("error_description") or j.get("error") or f"HTTP {r.status_code}")
-              except Exception:
-                  detail=f"HTTP {r.status_code}"
-          msg=("🚨 黑嚕嚕｜Google OAuth 警報\n"
-               "Google refresh token 健康檢查失敗。\n"
-               f"原因：{detail[:180]}\n"
-               "Auto Forward 可能無法讀寫 Drive，請重新授權並更新 Streamlit / GitHub 的 refresh token。")
-          if tg and chat:
-              try:
-                  requests.post(f"https://api.telegram.org/bot{tg}/sendMessage",
-                                json={"chat_id":chat,"text":msg},timeout=15).raise_for_status()
-                  print("Telegram OAuth alert sent")
-              except Exception as e:
-                  print("Telegram alert failed:", type(e).__name__)
-          # Mark job failed so GitHub also shows a red failure.
+          msg="🚨 黑嚕嚕｜Google OAuth 失效\nAuto Forward 無法讀寫 Drive，請重新授權並更新 refresh token。"
+          try:
+              requests.post(
+                  f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+                  json={"chat_id":os.environ["TELEGRAM_CHAT_ID"],"text":msg},timeout=15)
+          except Exception: pass
+          print("OAUTH_HEALTH_FAIL",r.status_code,r.text[:300])
           sys.exit(1)
           PY
 
-      - name: Start Streamlit locally
+      - name: Run headless Forward worker
+        # 08:20 只做 OAuth 健康檢查；盤後/手動執行才跑正式 Worker。
+        shell: bash
         run: |
-          nohup streamlit run app.py \
-            --server.headless true \
-            --server.address 127.0.0.1 \
-            --server.port 8501 \
-            > /tmp/streamlit.log 2>&1 &
-          echo $! > /tmp/streamlit.pid
-          for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null; then
-              echo "Streamlit is ready"
-              exit 0
-            fi
-            sleep 2
-          done
-          cat /tmp/streamlit.log
-          exit 1
-
-      - name: Open app and let Auto Forward run
-        run: |
-          python - <<'PY'
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              page = browser.new_page(viewport={"width": 1440, "height": 1200})
-              page.goto("http://127.0.0.1:8501", wait_until="domcontentloaded", timeout=120000)
-              page.wait_for_timeout(120000)
-              print("Auto Forward browser session completed")
-              browser.close()
-          PY
-
-      - name: Show Streamlit log
-        if: always()
-        run: |
-          echo '===== Streamlit log ====='
-          tail -n 250 /tmp/streamlit.log || true
+          HOUR=$(date +%H)
+          MIN=$(date +%M)
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "schedule" ] && [ "$HOUR" -lt 14 ]; then
+            echo "Morning OAuth health check completed; Forward worker skipped."
+            exit 0
+          fi
+          python forward_worker.py
