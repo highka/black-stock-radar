@@ -7690,7 +7690,7 @@ def _v36251_drive_test():
 
 st.divider()
 st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.28.4｜整數股成交＋收盤摘要＋OAuth警報＋Telegram/LINE＋Auto Forward＋Fail-Closed')
+st.success('✅ Build：V3.6.29｜Headless Worker＋收盤摘要＋OAuth警報＋Telegram/LINE＋Fail-Closed')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -7997,7 +7997,7 @@ if st.button('📨 發送 Telegram / LINE 測試通知', key='v36283_test_notify
     test_text = (
         '🖤 黑嚕嚕台股雷達\n'
         'Telegram / LINE 通知測試成功 ✅\n'
-        'Build：V3.6.28.4\n'
+        'Build：V3.6.29\n'
         f'時間：{taiwan_time_text()}'
     )
     test_results = _v36283_send_message(test_text)
