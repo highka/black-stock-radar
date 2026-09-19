@@ -6603,6 +6603,42 @@ def _v3624_num(v, default=np.nan):
     x=pd.to_numeric(v, errors='coerce')
     return float(x) if pd.notna(x) and np.isfinite(float(x)) else default
 
+def _v36293_tw_stock_tick(price):
+    """台股普通股/興櫃股票常用最小升降單位。Forward 股票池排除 ETF。"""
+    p=_v3624_num(price)
+    if not np.isfinite(p) or p<=0:
+        return np.nan
+    if p < 10: return 0.01
+    if p < 50: return 0.05
+    if p < 100: return 0.10
+    if p < 500: return 0.50
+    if p < 1000: return 1.00
+    return 5.00
+
+def _v36293_legal_exec_price(raw_price, slip_pct, side='BUY'):
+    """
+    V3.6.29.3：滑價後必須落在台股合法 Tick。
+    BUY 採向上取整、SELL 採向下取整，維持保守的不利成交假設。
+    注意：只套用在「新產生的 Forward 成交」，不回寫既有 Drive 歷史成交。
+    """
+    raw=_v3624_num(raw_price)
+    slip=_v3624_num(slip_pct,0.0)
+    if not np.isfinite(raw) or raw<=0:
+        return np.nan
+    side=str(side).upper()
+    theoretical=raw*(1+slip/100) if side=='BUY' else raw*(1-slip/100)
+    tick=_v36293_tw_stock_tick(theoretical)
+    if not np.isfinite(tick) or tick<=0:
+        return theoretical
+    units=theoretical/tick
+    if side=='BUY':
+        legal=np.ceil(units-1e-12)*tick
+    else:
+        legal=np.floor(units+1e-12)*tick
+    # 避免浮點數留下 32.5000000004 之類顯示
+    decimals=2 if tick < 0.1 else (1 if tick < 1 else 0)
+    return round(float(legal),decimals)
+
 def _v3624_stock_df(symbol, market=''):
     try:
         d=get_stock_data(str(symbol).zfill(4), market or stock_market(symbol))
@@ -6690,7 +6726,7 @@ def _v3624_process_open_positions(state, fee, tax, slip):
             continue
 
         exit_date=pd.Timestamp(idx[exit_i]).normalize()
-        exit_exec=float(exit_raw)*(1-slip/100)
+        exit_exec=_v36293_legal_exec_price(exit_raw,slip,'SELL')
         gross=float(p['shares'])*exit_exec
         sell_cost=gross*((fee+tax)/100)
         proceeds=gross-sell_cost
@@ -6760,7 +6796,7 @@ def _v3624_process_pending(state, fee, tax, slip):
 
         eq,_=_v3624_current_equity(state,entry_date)
         target=eq*V3624_POS_PCT/100
-        entry_exec=entry_raw*(1+slip/100)
+        entry_exec=_v36293_legal_exec_price(entry_raw,slip,'BUY')
         unit_cost=entry_exec*(1+fee/100)
         alloc=min(target,float(state.get('cash',0)))
         if alloc<=0 or alloc<target*0.20:
@@ -7690,7 +7726,7 @@ def _v36251_drive_test():
 
 st.divider()
 st.subheader('🛡️ V3.6.28 Forward 每日健康檢查｜Google Drive 防覆寫安全帳本')
-st.success('✅ Build：V3.6.29｜Headless Worker＋收盤摘要＋OAuth警報＋Telegram/LINE＋Fail-Closed')
+st.success('✅ Build：V3.6.29.3｜TWSE Tick Fix / Headless Worker＋收盤摘要＋OAuth警報＋Telegram/LINE＋Fail-Closed')
 
 st.caption(
     'V3.6.23 已完成 Monte Carlo；本區不再最佳化 Gate D、排序、25檔、3.33% 或出場規則。'
@@ -8041,6 +8077,7 @@ for sym,p in state24.get('positions',{}).items():
         'N+1進場日':p.get('entry_date',''),'技術分數':p.get('score',np.nan),
         '進場價(元/股)':p.get('entry_raw',np.nan),
         '成交價含滑價':p.get('entry_exec',np.nan),
+        '成交價規則':'舊帳保留' if str(p.get('entry_date',''))<'2026-09-19' else '合法Tick',
         '持有股數':int(np.floor(float(p.get('shares',0)))) if pd.notna(p.get('shares',np.nan)) else 0,
         '最新收盤(元/股)':px,
         '實際成交成本':p.get('entry_total_cost',np.nan),'持倉市值':mv,
