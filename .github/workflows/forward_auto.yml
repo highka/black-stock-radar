@@ -1,21 +1,14 @@
-name: 黑嚕嚕 Auto Forward V3.6.29.2 Taiwan
+name: 黑嚕嚕 Auto Forward V3.6.29.4 Earlier UTC
 
 on:
   workflow_dispatch:
   schedule:
-    # V3.6.29.2：排程直接使用台灣時區，不再人工換算 UTC
-    - cron: '20 8 * * 1-5'
-      timezone: 'Asia/Taipei'   # 08:20 OAuth 健康檢查
-
-    # 盤後多重觸發；Worker 以 Drive last_auto_date 防止重複執行
-    - cron: '20 15 * * 1-5'
-      timezone: 'Asia/Taipei'   # 15:20 正式盤後執行
-    - cron: '50 15 * * 1-5'
-      timezone: 'Asia/Taipei'   # 15:50 第一備援
-    - cron: '20 16 * * 1-5'
-      timezone: 'Asia/Taipei'   # 16:20 第二備援
-    - cron: '20 17 * * 1-5'
-      timezone: 'Asia/Taipei'   # 17:20 最後備援
+    # GitHub Actions cron 使用 UTC；台灣時間 = UTC + 8
+    - cron: '20 0 * * 1-5'   # 台灣 08:20 OAuth 健康檢查
+    - cron: '50 6 * * 1-5'   # 台灣 14:50 盤後第一輪
+    - cron: '20 7 * * 1-5'   # 台灣 15:20 備援
+    - cron: '50 7 * * 1-5'   # 台灣 15:50 備援
+    - cron: '20 8 * * 1-5'   # 台灣 16:20 最後備援
 
 
 permissions:
@@ -108,9 +101,9 @@ jobs:
           echo "scheduled_cron=$SCHEDULE"
           echo "runner_taiwan_time=$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
-          # 排程直接指定 Asia/Taipei；即使 GitHub 實際啟動延遲，仍以 github.event.schedule 辨識工作種類。
+          # 排程使用 UTC 換算台灣時間；即使 GitHub 實際啟動延遲，仍以 github.event.schedule 辨識工作種類。
           # 改用 github.event.schedule 的原始 cron 字串辨識 08:20 OAuth-only 排程。
-          if [ "$EVENT" = "schedule" ] && [ "$SCHEDULE" = "20 8 * * 1-5" ]; then
+          if [ "$EVENT" = "schedule" ] && [ "$SCHEDULE" = "20 0 * * 1-5" ]; then
             echo "MORNING_OAUTH_ONLY_SUCCESS"
             exit 0
           fi
